@@ -409,14 +409,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                             .with_label_values(&["local", "dropped"])
                             .inc();
                         tracing::warn!(
-                            "Failed to enqueue RBC-DAG application carrier; the research run is invalid: {error}"
-                        );
-                    } else if let Err(error) =
-                        shadow.application_data_available(canonical.reference())
-                    {
-                        self.metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
-                        tracing::warn!(
-                            "Failed to record local RBC-DAG application availability: {error}"
+                            "Failed to enqueue non-authoritative RBC-DAG shadow carrier; comparison is invalid: {error}"
                         );
                     }
                 }

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-//! Async network adapter for the persisted RBC-DAG research runtime.
+//! Async, non-authoritative network adapter for the persisted RBC-DAG shadow.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,10 +33,8 @@ use crate::{
     },
     starfish_rbc::RbcCanonicalHeader,
     starfish_rbc_dag::{
-        ConsensusVertexReference, MAX_CARRIER_CONTENT_SIZE_V1, RbcDagCommitteeContextV1,
-        RbcDagContextV1,
+        MAX_CARRIER_CONTENT_SIZE_V1, RbcDagCommitteeContextV1, RbcDagContextV1,
         model::{ModelEffect, ModelError},
-        projection::ProjectionDecisionV1,
         storage::ShadowWalSyncPolicyV1,
     },
     starfish_rbc_dag_shadow::{
@@ -70,10 +68,9 @@ const SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1: Duration = Duration::from_milli
 /// Runtime role of the persisted carrier actor.
 ///
 /// Mirror mode preserves milestone three's one-to-one comparison against
-/// direct Starfish-RBC headers. Autonomous mode opens an independent carrier
-/// clock and owns embedded-RBC certification plus clean projection decisions.
-/// It deliberately does not call the legacy core dispatcher: replacing the
-/// temporary application-output scaffold is the M7 boundary.
+/// direct Starfish-RBC headers. Autonomous mode opens an independent,
+/// heartbeat-only carrier clock. It remains observational: neither mode can
+/// call the core dispatcher or mutate authoritative consensus state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShadowServiceModeV1 {
     DirectMirror,
@@ -147,7 +144,6 @@ enum ShadowServiceMessageV1 {
     TopologyChanged,
     RetryRecovery,
     HeartbeatTick,
-    DataAvailabilityChanged,
     Shutdown(oneshot::Sender<Result<(), ShadowServiceErrorV1>>),
 }
 
@@ -161,7 +157,6 @@ pub(crate) struct StarfishRbcDagShadowServiceHandleV1 {
     mode: ShadowServiceModeV1,
     desired_topology: Arc<Mutex<BTreeMap<AuthorityIndex, (bool, u64)>>>,
     desired_direct_deliveries: Arc<Mutex<BTreeSet<ShadowDeliveryIdentityV1>>>,
-    desired_available_applications: Arc<Mutex<BTreeSet<BlockReference>>>,
     invalidated_by_overload: Arc<Mutex<Option<&'static str>>>,
 }
 
@@ -285,34 +280,6 @@ impl StarfishRbcDagShadowServiceHandleV1 {
         }
     }
 
-    pub(crate) fn application_data_available(
-        &self,
-        application: BlockReference,
-    ) -> Result<(), ShadowServiceErrorV1> {
-        if !self.mode.is_autonomous() {
-            return Ok(());
-        }
-        if application.authority as usize >= self.committee_size {
-            return Err(ShadowServiceErrorV1::UnknownAuthority(
-                application.authority,
-            ));
-        }
-        if !self
-            .desired_available_applications
-            .lock()
-            .insert(application)
-        {
-            return Ok(());
-        }
-        match self
-            .sender
-            .try_send(ShadowServiceMessageV1::DataAvailabilityChanged)
-        {
-            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Closed(_)) => Err(ShadowServiceErrorV1::Stopped),
-        }
-    }
-
     pub(crate) fn peer_connected(&self, peer: AuthorityIndex) -> Result<(), ShadowServiceErrorV1> {
         self.update_peer(peer, true)
     }
@@ -374,7 +341,6 @@ impl ShadowServiceMessageV1 {
             Self::TopologyChanged => "topology_changed",
             Self::RetryRecovery => "recovery_retry",
             Self::HeartbeatTick => "heartbeat_tick",
-            Self::DataAvailabilityChanged => "data_availability_changed",
             Self::Shutdown(_) => "shutdown",
         }
     }
@@ -406,8 +372,6 @@ pub(crate) enum ShadowServiceEventV1 {
         carrier: BlockReference,
         header: RbcCanonicalHeader,
     },
-    VertexProjected(ConsensusVertexReference),
-    LeaderDecided(ProjectionDecisionV1),
     Comparison(ShadowDeliveryComparisonV1),
     Input {
         kind: &'static str,
@@ -697,7 +661,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     let (event_tx, event_rx) = mpsc::channel(SHADOW_SERVICE_EVENT_CAPACITY_V1);
     let desired_topology = Arc::new(Mutex::new(BTreeMap::new()));
     let desired_direct_deliveries = Arc::new(Mutex::new(BTreeSet::new()));
-    let desired_available_applications = Arc::new(Mutex::new(BTreeSet::new()));
     let invalidated_by_overload = Arc::new(Mutex::new(None));
     let retry_notification_pending = Arc::new(AtomicBool::new(false));
     let heartbeat_notification_pending = Arc::new(AtomicBool::new(false));
@@ -759,7 +722,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     let startup_events = event_tx.clone();
     let actor_desired_topology = Arc::clone(&desired_topology);
     let actor_desired_direct_deliveries = Arc::clone(&desired_direct_deliveries);
-    let actor_desired_available_applications = Arc::clone(&desired_available_applications);
     let actor_invalidated_by_overload = Arc::clone(&invalidated_by_overload);
     let actor_retry_notification_pending = Arc::clone(&retry_notification_pending);
     let actor_heartbeat_notification_pending = Arc::clone(&heartbeat_notification_pending);
@@ -978,12 +940,10 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             connected: BTreeSet::new(),
             desired_topology: actor_desired_topology,
             desired_direct_deliveries: actor_desired_direct_deliveries,
-            desired_available_applications: actor_desired_available_applications,
             observed_topology: BTreeMap::new(),
             invalidated_by_overload: actor_invalidated_by_overload,
             pending_local,
             assigned_applications,
-            available_applications: BTreeSet::new(),
             pending_recovery: BTreeMap::new(),
             recovery_last_attempt: BTreeMap::new(),
             sync_last_attempt: BTreeMap::new(),
@@ -1027,7 +987,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             mode,
             desired_topology,
             desired_direct_deliveries,
-            desired_available_applications,
             invalidated_by_overload,
         },
         event_rx,
@@ -1109,12 +1068,10 @@ struct ShadowServiceStateV1 {
     connected: BTreeSet<AuthorityIndex>,
     desired_topology: Arc<Mutex<BTreeMap<AuthorityIndex, (bool, u64)>>>,
     desired_direct_deliveries: Arc<Mutex<BTreeSet<ShadowDeliveryIdentityV1>>>,
-    desired_available_applications: Arc<Mutex<BTreeSet<BlockReference>>>,
     observed_topology: BTreeMap<AuthorityIndex, (bool, u64)>,
     invalidated_by_overload: Arc<Mutex<Option<&'static str>>>,
     pending_local: BTreeMap<RoundNumber, ShadowLocalCarrierV1>,
     assigned_applications: BTreeSet<BlockReference>,
-    available_applications: BTreeSet<BlockReference>,
     pending_recovery: BTreeMap<BlockReference, BTreeSet<AuthorityIndex>>,
     recovery_last_attempt: BTreeMap<(BlockReference, AuthorityIndex), Instant>,
     sync_last_attempt: BTreeMap<(AuthorityIndex, RoundNumber), Instant>,
@@ -1332,59 +1289,12 @@ impl ShadowServiceStateV1 {
         self.emit(ShadowServiceEventV1::PendingRecovery(
             self.pending_recovery.len(),
         ));
-        self.reconcile_data_availability();
         self.report_new_shadow_deliveries();
-        self.report_projection_progress();
         self.flush_carrier_sync_requests(false);
         self.emit_clock_state();
     }
 
-    fn reconcile_data_availability(&mut self) {
-        if !self.mode.is_autonomous() {
-            return;
-        }
-        let mut desired = self.desired_available_applications.lock().clone();
-        desired.extend(self.core.intrinsically_available_applications());
-        for application in desired {
-            let carriers = self.core.application_carriers(application);
-            if carriers.is_empty() {
-                continue;
-            }
-            for carrier in &carriers {
-                if self.core.carrier_data_available(*carrier) {
-                    continue;
-                }
-                let before = self.core.wal_counts();
-                match self.core.mark_carrier_data_available(*carrier) {
-                    Ok(effects) => {
-                        self.report_wal_delta(before);
-                        self.process_effects(effects);
-                    }
-                    Err(error) => {
-                        self.mark_fatal(error);
-                        return;
-                    }
-                }
-            }
-            if carriers
-                .iter()
-                .all(|carrier| self.core.carrier_data_available(*carrier))
-            {
-                self.available_applications.insert(application);
-            }
-        }
-    }
-
-    fn report_projection_progress(&mut self) {
-        for projected in self.core.drain_projected_vertices() {
-            self.emit(ShadowServiceEventV1::VertexProjected(projected));
-        }
-        for decision in self.core.drain_projection_decisions() {
-            self.emit(ShadowServiceEventV1::LeaderDecided(decision));
-        }
-    }
-
-    fn try_create_autonomous_carrier(&mut self, allow_no_vote: bool) {
+    fn try_create_autonomous_carrier(&mut self) {
         if !self.mode.is_autonomous() || !self.core.can_create_carrier() {
             self.emit_clock_state();
             return;
@@ -1402,11 +1312,8 @@ impl ShadowServiceStateV1 {
             Some(application) => self.core.create_local_application_carrier(
                 application.application_header.clone(),
                 creation_time_ns,
-                allow_no_vote,
             ),
-            None => self
-                .core
-                .create_local_control_heartbeat(creation_time_ns, allow_no_vote),
+            None => self.core.create_local_control_heartbeat(creation_time_ns),
         };
         match result {
             Ok((envelope, effects)) => {
@@ -1456,7 +1363,7 @@ impl ShadowServiceStateV1 {
     fn drive_autonomous_catch_up(&mut self) {
         while self.sync_catch_up && self.core.can_create_carrier() && !self.fatal {
             let round_before = self.core.local_carrier_round();
-            self.try_create_autonomous_carrier(true);
+            self.try_create_autonomous_carrier();
             if self.core.local_carrier_round() == round_before {
                 break;
             }
@@ -1559,7 +1466,7 @@ impl ShadowServiceStateV1 {
                 && !self.fatal
             {
                 let round_before = self.core.local_carrier_round();
-                self.try_create_autonomous_carrier(false);
+                self.try_create_autonomous_carrier();
                 if self.core.local_carrier_round() == round_before {
                     break;
                 }
@@ -2171,10 +2078,7 @@ fn run_shadow_service(
                 state.flush_recovery_requests();
                 state.flush_carrier_sync_requests(false);
             }
-            ShadowServiceMessageV1::HeartbeatTick => state.try_create_autonomous_carrier(true),
-            ShadowServiceMessageV1::DataAvailabilityChanged => {
-                state.reconcile_data_availability();
-            }
+            ShadowServiceMessageV1::HeartbeatTick => state.try_create_autonomous_carrier(),
             ShadowServiceMessageV1::Shutdown(_) => unreachable!("shutdown handled before dispatch"),
         }
         state.reconcile_topology();
@@ -2465,8 +2369,6 @@ mod tests {
         deliveries: &mut [usize],
         application_deliveries: &mut [BTreeSet<BlockReference>],
         sync_requests: &mut usize,
-        projected_vertices: &mut usize,
-        projected_decisions: &mut usize,
         target_open_round: RoundNumber,
     ) {
         timeout(EVENT_TIMEOUT, async {
@@ -2524,12 +2426,6 @@ mod tests {
                                 ..
                             } => {
                                 application_deliveries[sender].insert(header.reference());
-                            }
-                            ShadowServiceEventV1::VertexProjected(_) => {
-                                *projected_vertices = projected_vertices.saturating_add(1);
-                            }
-                            ShadowServiceEventV1::LeaderDecided(_) => {
-                                *projected_decisions = projected_decisions.saturating_add(1);
                             }
                             ShadowServiceEventV1::Rejected { error, .. }
                                 if error.contains("FutureCarrierOutsideBuffer")
@@ -2790,8 +2686,6 @@ mod tests {
         let mut deliveries = vec![0; n];
         let mut application_deliveries = vec![BTreeSet::new(); n];
         let mut sync_requests = 0;
-        let mut projected_vertices = 0;
-        let mut projected_decisions = 0;
         for (authority, handle) in handles.iter().enumerate() {
             for peer in 0..n {
                 if peer != authority {
@@ -2799,7 +2693,7 @@ mod tests {
                 }
             }
         }
-        for fixed_round in 1..=18 {
+        for fixed_round in 1..=6 {
             for handle in &handles {
                 handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
             }
@@ -2810,8 +2704,6 @@ mod tests {
                 &mut deliveries,
                 &mut application_deliveries,
                 &mut sync_requests,
-                &mut projected_vertices,
-                &mut projected_decisions,
                 fixed_round + 1,
             )
             .await;
@@ -2821,12 +2713,7 @@ mod tests {
             deliveries.iter().all(|count| *count > 0),
             "every node must RBC-deliver mature heartbeat carriers: {deliveries:?}"
         );
-        assert!(open_rounds.iter().all(|round| *round >= 19));
-        assert!(projected_vertices >= n * 3);
-        assert!(
-            projected_decisions > 0,
-            "clean projection did not decide: vertices={projected_vertices}, rounds={open_rounds:?}"
-        );
+        assert!(open_rounds.iter().all(|round| *round >= 7));
         assert_eq!(
             sync_requests, 0,
             "healthy proactive rounds must not trigger repair polling"
@@ -2888,11 +2775,8 @@ mod tests {
             }
         }
 
-        // Empty application commitments have no shard reconstruction event.
-        // They must become intrinsically data-available from their exact
-        // canonical header or the certified projection stalls behind them.
         let applications = (0..N as AuthorityIndex)
-            .map(|authority| direct_header(authority, 1, 0))
+            .map(|authority| direct_header(authority, 1, 0x70 + authority as u8))
             .collect::<Vec<_>>();
         let expected = applications
             .iter()
@@ -2906,8 +2790,6 @@ mod tests {
         let mut deliveries = vec![0; N];
         let mut application_deliveries = vec![BTreeSet::new(); N];
         let mut sync_requests = 0;
-        let mut projected_vertices = 0;
-        let mut projected_decisions = 0;
         pump_autonomous_until_round(
             &handles,
             &mut events,
@@ -2915,8 +2797,6 @@ mod tests {
             &mut deliveries,
             &mut application_deliveries,
             &mut sync_requests,
-            &mut projected_vertices,
-            &mut projected_decisions,
             5,
         )
         .await;
@@ -2932,10 +2812,6 @@ mod tests {
             "application-critical phase carriers must not wait for a heartbeat tick"
         );
         assert_eq!(sync_requests, 0);
-        assert!(
-            projected_vertices >= N,
-            "empty embedded applications must not stall clean projection"
-        );
 
         drop(events);
         for handle in &handles {
@@ -3089,8 +2965,6 @@ mod tests {
         let mut deliveries = vec![0; N];
         let mut application_deliveries = vec![BTreeSet::new(); N];
         let mut sync_requests = 0;
-        let mut projected_vertices = 0;
-        let mut projected_decisions = 0;
         for handle in &handles {
             handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
         }
@@ -3101,8 +2975,6 @@ mod tests {
             &mut deliveries,
             &mut application_deliveries,
             &mut sync_requests,
-            &mut projected_vertices,
-            &mut projected_decisions,
             2,
         )
         .await;
@@ -3154,8 +3026,6 @@ mod tests {
             &mut deliveries,
             &mut application_deliveries,
             &mut sync_requests,
-            &mut projected_vertices,
-            &mut projected_decisions,
             10,
         )
         .await;
@@ -3748,7 +3618,6 @@ mod tests {
             input_capacity,
             desired_topology: Arc::new(Mutex::new(BTreeMap::new())),
             desired_direct_deliveries: Arc::new(Mutex::new(BTreeSet::new())),
-            desired_available_applications: Arc::new(Mutex::new(BTreeSet::new())),
             invalidated_by_overload: Arc::new(Mutex::new(None)),
         };
         for round in 0..input_capacity {
@@ -3799,7 +3668,6 @@ mod tests {
             input_capacity: 1,
             desired_topology: Arc::new(Mutex::new(BTreeMap::new())),
             desired_direct_deliveries: Arc::new(Mutex::new(BTreeSet::new())),
-            desired_available_applications: Arc::new(Mutex::new(BTreeSet::new())),
             invalidated_by_overload: Arc::new(Mutex::new(None)),
         };
         assert!(matches!(
@@ -3834,7 +3702,6 @@ mod tests {
             input_capacity,
             desired_topology: Arc::new(Mutex::new(BTreeMap::new())),
             desired_direct_deliveries: Arc::new(Mutex::new(BTreeSet::new())),
-            desired_available_applications: Arc::new(Mutex::new(BTreeSet::new())),
             invalidated_by_overload: Arc::clone(&invalidated),
         };
         for peer in 1..LARGE_N {

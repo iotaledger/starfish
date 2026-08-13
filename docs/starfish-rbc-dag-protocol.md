@@ -17,11 +17,9 @@ implemented. The staged prototype runs under `starfish-rbc`: direct-header compa
 only application-header certification authority with
 `--starfish-rbc-dag-embedded-rbc-authority`. Direct INIT still transports the application payload,
 but direct ECHO, READY, and delivery are suppressed in that mode. Performance experiments may add
-`--starfish-rbc-dag-shadow-buffered-wal`; that profile is explicitly not crash-safe. Autonomous
-carriers now create durably locked logical consensus vertices and the clean projection produces
-Starfish commit/skip decisions. Deterministic frontier output still uses the existing Starfish DAG
-until milestone seven. The eventual protocol is new, not a transport option or a version-two alias
-for `starfish-rbc`.
+`--starfish-rbc-dag-shadow-buffered-wal`; that profile is explicitly not crash-safe. Consensus
+projection, commit, and output still use the existing Starfish DAG. The eventual protocol is new,
+not a transport option or a version-two alias for `starfish-rbc`.
 
 The implemented [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains the conservative
 baseline: it sends Bracha INIT/ECHO/READY as direct network messages, advances Starfish only through
@@ -61,15 +59,13 @@ containing the exact canonical application header, durable application-origin re
 immediate application/phase scheduling, and an opt-in authority boundary that prevents direct
 ECHO/READY from certifying a header. Idle control heartbeats use the same resolved leader timeout as
 the Starfish pacemaker (600 ms for Push/Starfish-RBC by default); application carriers and their
-encodable ECHO/READY follow-ups are event-driven and do not wait for that timeout. Milestone six
-adds independently numbered consensus vertices, quorum strong parents, objective Vote/NoVote
-choices, exact contiguous delivery frontiers, durable local consensus locks, and a live committer
-that consumes only RBC-delivered, data-available projected vertices.
+encodable ECHO/READY follow-ups are event-driven and do not wait for that timeout.
 
-The current authoritative mode changes header certification and produces certified carrier-DAG
-leader decisions. Direct INIT is still the application-payload transport and is not a certification
-vote. The legacy Starfish DAG remains only as the temporary application-output scaffold; replacing
-its commit/output path with deterministic committed frontier deltas is milestone seven.
+The current authoritative mode changes only header certification. Consensus vertices, certified
+projection, commits, and application ordering remain on the existing Starfish DAG. Direct INIT is
+still the application-payload transport and is not a certification vote. Replacing that remaining
+wrapper with a payload-only path and moving consensus into the clean carrier projection are later
+milestones.
 
 Shadow restart coverage is deliberately scoped to reopening the actor and its WAL: mirror mode
 requires an identical recovered direct-header history, control-only autonomous history reopens
@@ -931,12 +927,11 @@ Starfish-RBC; application and encodable phase carriers are immediate. The harnes
 generator warmup, snapshots cumulative counters at the active boundary, and drains final latency
 samples.
 
-| Profile | Verdict | TPS | Block latency | E2E latency | Outbound |
+| Profile | Verdict | TPS | p50 block | p50 E2E | Outbound |
 |---|---:|---:|---:|---:|---:|
 | Direct Starfish-RBC, shadow off | n/a | 972.25 | 1,508.0 ms | 1,724.0 ms | 0.53 MB/s |
 | Autonomous RBC-DAG, buffered WAL | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
 | Embedded RBC authoritative (milestone five) | VALID 10/10 | 861.92 | 3,539.3 ms | 5,477.5 ms | 0.52 MB/s |
-| Certified projection (milestone six) | VALID 10/10 | 799.07 | 5,102.9 ms | 8,650.9 ms | 0.50 MB/s |
 | Autonomous RBC-DAG, per-transition fsync | INVALID 9/10 | 948.83 | 2,569.1 ms | 3,067.4 ms | 0.54 MB/s |
 
 The valid buffered run reached carrier round 275 at every validator, with 2,749 accepted
@@ -951,15 +946,9 @@ rounds 458–459, and ended with zero pending recovery. Its direct ECHO and READ
 the composed four-validator test also asserts zero such outbound messages. Its higher latency is
 not evidence for a bad 250 ms timer—the independent timer was removed, and the same Starfish
 timeout was used. It exposes the transitional clean-predecessor gate: the existing direct Starfish
-DAG still serializes proposal creation on embedded delivery.
-
-The milestone-six run reached carrier rounds 356–359 with 35,506 carrier deliveries, 8,059
-application deliveries, 8,487 clean projected vertices, 830 clean direct commits, and zero pending
-recovery. It validates the certified-projection structure, not final performance. The logical
-committer currently runs beside the legacy clean-predecessor/output path, so this transitional run
-pays for both and its 5.1/8.7-second latency is a red flag rather than a protocol target. Milestone
-seven must make committed frontier deltas the sole ordering/output path before latency is compared
-as the complete RBC-DAG protocol.
+DAG still serializes proposal creation on embedded delivery. Milestone six must replace that gate
+with the optimistic carrier clock plus certified consensus projection before the complete protocol
+can be expected to recover Starfish pipelining.
 
 ## 19. Contained implementation milestones
 
@@ -986,10 +975,8 @@ Every milestone is committed separately.
    in version-two carriers, durably reconcile their origins, schedule application/phase carriers
    immediately, and remove direct ECHO/READY/delivery authority. Direct INIT remains payload
    transport; composed tests assert zero direct ECHO/READY traffic and positive embedded delivery.
-6. **Certified consensus projection (implemented):** add optional independently numbered consensus
-   vertices, quorum strong parents, explicit timeout-bound leader choices, contiguous exact
-   delivery frontiers, durable slot/choice locks, and a live clean-only direct committer. Malformed
-   optional vertices do not poison their enclosing carrier.
+6. **Certified consensus projection:** add optional consensus vertices, strong parents, explicit
+   leader choice, contiguous delivery frontiers, and strict clean-only committer consumers.
 7. **Frontier linearizer and recovery:** commit deterministic frontier deltas, persist/reconstruct
    prefixes and anchors, and add late-node and crash/restart tests.
 8. **Benchmarks:** compare the complete protocol with direct `starfish-rbc`, unsafe `starfish-mac`,

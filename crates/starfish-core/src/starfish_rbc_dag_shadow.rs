@@ -1,13 +1,13 @@
 // Copyright (c) 2026 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable, single-owner execution for the embedded-RBC Starfish DAG.
+//! Durable, single-owner shadow execution for the embedded-RBC Starfish DAG.
 //!
-//! Direct-mirror mode remains observational. Autonomous mode owns carrier
-//! admission, embedded RBC, and certified projection decisions; the legacy
-//! Starfish DAG is still the temporary application-output scaffold until M7.
-//! One [`ShadowWalV1`] batch is one reducer transition. Effects are returned
-//! only after that complete batch has reached durable storage.
+//! This adapter is deliberately non-authoritative: it consumes the same
+//! carrier bytes as the live protocol, persists its own deterministic input
+//! and trace log, and reports comparison results without influencing the live
+//! protocol. One [`ShadowWalV1`] batch is one reducer transition. Effects are
+//! returned only after that complete batch has reached durable storage.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,17 +21,13 @@ use crate::{
     starfish_rbc::RbcCanonicalHeader,
     starfish_rbc_dag::{
         AuthenticatedCarrierV1, CandidateCarrierV1, CarrierAuthenticationV1, CarrierAuthorizerV1,
-        CarrierHeaderV1Args, ConsensusVertexReference, ConsensusVertexV1, LeaderChoiceV1,
-        LocallyAuthenticatedCarrierV1, RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagError,
-        RbcPhaseStatementV1, carrier_genesis_reference,
+        CarrierHeaderV1Args, LocallyAuthenticatedCarrierV1, RbcDagCommitteeContextV1,
+        RbcDagContextV1, RbcDagError, RbcPhaseStatementV1,
         journal::{
             IngressProvenanceV1, JournalErrorV1, JournalEventV1, ValidatedJournalBatchV1,
             WriteAheadJournalV1,
         },
         model::{ModelEffect, ModelError, ModelInputRecord, ModelTraceEvent, RbcDagModel},
-        projection::{
-            CertifiedProjectionError, CertifiedProjectionModel, LeaderSlotV1, ProjectionDecisionV1,
-        },
         storage::{
             MAX_SHADOW_WAL_RECORD_SIZE_V1, ShadowWalErrorV1, ShadowWalNamespaceV1,
             ShadowWalSummaryV1, ShadowWalSyncPolicyV1, ShadowWalV1,
@@ -51,7 +47,6 @@ const RECORD_AUTHENTICATED_INGRESS: u8 = 0x01;
 const RECORD_CANDIDATE_RETENTION: u8 = 0x02;
 const RECORD_CANDIDATE_RECOVERY: u8 = 0x03;
 const RECORD_LOCAL_OUTBOUND_CONTENT: u8 = 0x04;
-const RECORD_DATA_AVAILABLE: u8 = 0x05;
 const RECORD_MODEL_TRACE: u8 = 0x10;
 const RECORD_LOCAL_OUTBOUND_SIDECAR: u8 = 0x11;
 const RECORD_LOCAL_OUTBOUND_EXPOSE: u8 = 0x12;
@@ -63,8 +58,6 @@ const TRACE_PHASE_CURSOR_ADVANCED: u8 = 0x03;
 const TRACE_LOCAL_CARRIER_FIXED: u8 = 0x04;
 const TRACE_DELIVERY_LOCKED: u8 = 0x05;
 const TRACE_EFFECT: u8 = 0x06;
-const TRACE_CONSENSUS_SLOT_LOCKED: u8 = 0x07;
-const TRACE_LEADER_CHOICE_LOCKED: u8 = 0x08;
 
 const EFFECT_NEED_CARRIER: u8 = 0x00;
 const EFFECT_DELIVERED: u8 = 0x01;
@@ -266,7 +259,6 @@ pub(crate) enum ShadowCodecErrorV1 {
     TrailingBytes(usize),
     InvalidProvenance(u8),
     InvalidPhase(u8),
-    InvalidLeaderChoice(u8),
     InvalidTrace(u8),
     InvalidEffect(u8),
     NonCanonicalHolders,
@@ -317,7 +309,6 @@ pub(crate) enum ShadowErrorV1 {
     MissingDeliveredCandidate(BlockReference),
     PostDurabilityCommit(ModelError),
     PostDurabilityJournal(JournalErrorV1),
-    Projection(CertifiedProjectionError),
     Poisoned,
 }
 
@@ -390,7 +381,6 @@ impl fmt::Display for ShadowErrorV1 {
                 formatter,
                 "shadow journal commit failed after WAL durability: {error}"
             ),
-            Self::Projection(error) => write!(formatter, "{error}"),
             Self::Poisoned => formatter.write_str("shadow core is poisoned"),
         }
     }
@@ -404,7 +394,6 @@ impl Error for ShadowErrorV1 {
             Self::Carrier(error) => Some(error),
             Self::Model(error) | Self::PostDurabilityCommit(error) => Some(error),
             Self::Journal(error) | Self::PostDurabilityJournal(error) => Some(error),
-            Self::Projection(error) => Some(error),
             _ => None,
         }
     }
@@ -440,12 +429,6 @@ impl From<JournalErrorV1> for ShadowErrorV1 {
     }
 }
 
-impl From<CertifiedProjectionError> for ShadowErrorV1 {
-    fn from(error: CertifiedProjectionError) -> Self {
-        Self::Projection(error)
-    }
-}
-
 #[derive(Clone)]
 enum ShadowInputV1 {
     AuthenticatedIngress {
@@ -455,7 +438,6 @@ enum ShadowInputV1 {
     CandidateRetention(CandidateCarrierV1),
     CandidateRecovery(CandidateCarrierV1),
     LocalOutbound(LocallyAuthenticatedCarrierV1),
-    DataAvailable(BlockReference),
 }
 
 impl ShadowInputV1 {
@@ -473,18 +455,14 @@ impl ShadowInputV1 {
             Self::LocalOutbound(authenticated) => {
                 ModelInputRecord::LocalCarrierFixed(authenticated.clone())
             }
-            Self::DataAvailable(reference) => ModelInputRecord::DataAvailable(*reference),
         }
     }
 
-    fn candidate(&self) -> Option<&CandidateCarrierV1> {
+    fn candidate(&self) -> &CandidateCarrierV1 {
         match self {
-            Self::AuthenticatedIngress { authenticated, .. } => Some(authenticated.candidate()),
-            Self::CandidateRetention(candidate) | Self::CandidateRecovery(candidate) => {
-                Some(candidate)
-            }
-            Self::LocalOutbound(authenticated) => Some(authenticated.candidate()),
-            Self::DataAvailable(_) => None,
+            Self::AuthenticatedIngress { authenticated, .. } => authenticated.candidate(),
+            Self::CandidateRetention(candidate) | Self::CandidateRecovery(candidate) => candidate,
+            Self::LocalOutbound(authenticated) => authenticated.candidate(),
         }
     }
 
@@ -498,7 +476,7 @@ struct DecodedRawRecord {
     payload: Vec<u8>,
 }
 
-/// Synchronous, durable RBC-DAG core.
+/// Synchronous, non-authoritative shadow core.
 ///
 /// This type has one mutable model, journal, and WAL handle and intentionally
 /// offers no shared-state wrapper. A caller may move it between threads but
@@ -517,11 +495,6 @@ pub(crate) struct StarfishRbcDagShadowV1 {
     ordinarily_retained_slots: BTreeMap<(AuthorityIndex, RoundNumber), BlockReference>,
     slot_candidates: BTreeMap<(AuthorityIndex, RoundNumber), BTreeSet<BlockReference>>,
     requested_recoveries: BTreeMap<BlockReference, Vec<AuthorityIndex>>,
-    projection: CertifiedProjectionModel,
-    projection_rejected: BTreeMap<BlockReference, CertifiedProjectionError>,
-    projected_decisions: BTreeSet<ProjectionDecisionV1>,
-    pending_projected_vertices: Vec<ConsensusVertexReference>,
-    pending_projection_decisions: Vec<ProjectionDecisionV1>,
     poisoned: bool,
 }
 
@@ -559,7 +532,6 @@ impl StarfishRbcDagShadowV1 {
         let discarded_tail_bytes = recovery.discarded_tail_bytes();
 
         let model = RbcDagModel::new(committee.committee_arc(), own_authority, context)?;
-        let projection = CertifiedProjectionModel::from_committee_context(committee.clone());
         let journal = WriteAheadJournalV1::new(context, own_authority);
         let mut core = Self {
             committee,
@@ -575,11 +547,6 @@ impl StarfishRbcDagShadowV1 {
             ordinarily_retained_slots: BTreeMap::new(),
             slot_candidates: BTreeMap::new(),
             requested_recoveries: BTreeMap::new(),
-            projection,
-            projection_rejected: BTreeMap::new(),
-            projected_decisions: BTreeSet::new(),
-            pending_projected_vertices: Vec::new(),
-            pending_projection_decisions: Vec::new(),
             poisoned: false,
         };
 
@@ -587,10 +554,6 @@ impl StarfishRbcDagShadowV1 {
             let input = core.decode_batch(batch.records())?;
             core.apply_replayed(input, batch.records(), batch.sequence())?;
         }
-        // Historical decisions are reconstructed to validate replay, but are
-        // not re-emitted as fresh runtime observations after restart.
-        core.pending_projection_decisions.clear();
-        core.pending_projected_vertices.clear();
         let recovery_effects = core
             .requested_recoveries
             .iter()
@@ -672,65 +635,6 @@ impl StarfishRbcDagShadowV1 {
             .count()
     }
 
-    pub(crate) fn drain_projection_decisions(&mut self) -> Vec<ProjectionDecisionV1> {
-        std::mem::take(&mut self.pending_projection_decisions)
-    }
-
-    pub(crate) fn drain_projected_vertices(&mut self) -> Vec<ConsensusVertexReference> {
-        std::mem::take(&mut self.pending_projected_vertices)
-    }
-
-    /// Persist the external data-availability predicate for one exact
-    /// application-bearing carrier. Control carriers are available by shape
-    /// and never require this oracle.
-    pub(crate) fn mark_carrier_data_available(
-        &mut self,
-        reference: BlockReference,
-    ) -> Result<Vec<ModelEffect>, ShadowErrorV1> {
-        self.ensure_live()?;
-        if self
-            .model
-            .lifecycle(&reference)
-            .is_some_and(|lifecycle| lifecycle.data_available)
-        {
-            return Ok(Vec::new());
-        }
-        self.apply_durable(ShadowInputV1::DataAvailable(reference))
-    }
-
-    pub(crate) fn application_carriers(&self, application: BlockReference) -> Vec<BlockReference> {
-        self.candidates
-            .iter()
-            .filter_map(|(reference, candidate)| {
-                candidate
-                    .header()
-                    .application_header()
-                    .is_some_and(|header| header.reference() == application)
-                    .then_some(*reference)
-            })
-            .collect()
-    }
-
-    /// Application headers with the canonical empty commitment need no
-    /// transaction reconstruction. Their exact carrier bytes are therefore
-    /// sufficient data-availability evidence once the carrier is retained.
-    pub(crate) fn intrinsically_available_applications(&self) -> Vec<BlockReference> {
-        self.candidates
-            .values()
-            .filter_map(|candidate| candidate.header().application_header())
-            .filter(|header| header.transactions_commitment() == TransactionsCommitment::default())
-            .map(RbcCanonicalHeader::reference)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    pub(crate) fn carrier_data_available(&self, reference: BlockReference) -> bool {
-        self.model
-            .lifecycle(&reference)
-            .is_some_and(|lifecycle| lifecycle.data_available)
-    }
-
     pub(crate) fn wal_counts(&self) -> (u64, u64) {
         (self.wal.batch_count(), self.wal.record_count())
     }
@@ -756,7 +660,6 @@ impl StarfishRbcDagShadowV1 {
             round,
             transactions_commitment,
             None,
-            None,
             creation_time_ns,
         )
     }
@@ -766,7 +669,6 @@ impl StarfishRbcDagShadowV1 {
         round: RoundNumber,
         transactions_commitment: TransactionsCommitment,
         application_header: Option<RbcCanonicalHeader>,
-        consensus_vertex: Option<ConsensusVertexV1>,
         creation_time_ns: TimestampNs,
     ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
         self.ensure_live()?;
@@ -781,7 +683,7 @@ impl StarfishRbcDagShadowV1 {
                 application_header,
                 data_acknowledgments: Vec::new(),
                 phase_batch: self.model.pending_phase_batch(),
-                consensus_vertex,
+                consensus_vertex: None,
                 creation_time_ns,
             },
             &self.committee,
@@ -812,18 +714,9 @@ impl StarfishRbcDagShadowV1 {
     pub(crate) fn create_local_control_heartbeat(
         &mut self,
         creation_time_ns: TimestampNs,
-        allow_no_vote: bool,
     ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
         let round = self.model.local_carrier_round();
-        let (own_prev, _) = self.model.local_parent_set()?;
-        let consensus_vertex = self.build_local_consensus_vertex(own_prev, allow_no_vote);
-        self.create_local_carrier_with_application(
-            round,
-            TransactionsCommitment::default(),
-            None,
-            consensus_vertex,
-            creation_time_ns,
-        )
+        self.create_local_carrier(round, TransactionsCommitment::default(), creation_time_ns)
     }
 
     /// Assign one exact direct application header to the currently open
@@ -833,97 +726,15 @@ impl StarfishRbcDagShadowV1 {
         &mut self,
         application_header: RbcCanonicalHeader,
         creation_time_ns: TimestampNs,
-        allow_no_vote: bool,
     ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
         let round = self.model.local_carrier_round();
         let commitment = application_header.transactions_commitment();
-        let (own_prev, _) = self.model.local_parent_set()?;
-        let consensus_vertex = self.build_local_consensus_vertex(own_prev, allow_no_vote);
         self.create_local_carrier_with_application(
             round,
             commitment,
             Some(application_header),
-            consensus_vertex,
             creation_time_ns,
         )
-    }
-
-    fn build_local_consensus_vertex(
-        &self,
-        own_prev: BlockReference,
-        allow_no_vote: bool,
-    ) -> Option<ConsensusVertexV1> {
-        let consensus_round = self.next_local_consensus_round();
-        let (strong_parents, leader_choice) = if consensus_round == 1 {
-            let strong_parents = self
-                .committee
-                .committee()
-                .authorities()
-                .map(|authority| {
-                    ConsensusVertexReference::new(carrier_genesis_reference(authority), 0)
-                })
-                .collect::<Vec<_>>();
-            let leader_author = self.committee.committee().elect_leader(0);
-            (
-                strong_parents,
-                LeaderChoiceV1::Vote {
-                    leader: ConsensusVertexReference::new(
-                        carrier_genesis_reference(leader_author),
-                        0,
-                    ),
-                },
-            )
-        } else {
-            let parent_round = consensus_round - 1;
-            let mut by_author = BTreeMap::new();
-            for parent in self.projection.projected_values_at_round(parent_round) {
-                by_author.entry(parent.author()).or_insert(parent);
-            }
-            let own_parent = *by_author.get(&self.own_authority)?;
-            let stake = by_author
-                .keys()
-                .filter_map(|authority| self.committee.committee().get_stake(*authority))
-                .fold(0, Stake::saturating_add);
-            if stake < self.committee.committee().quorum_threshold() {
-                return None;
-            }
-            let leader_author = self.committee.committee().elect_leader(parent_round);
-            let leader_choice = match by_author.get(&leader_author).copied() {
-                Some(leader) => LeaderChoiceV1::Vote { leader },
-                None if allow_no_vote => LeaderChoiceV1::NoVote {
-                    leader_author,
-                    leader_round: parent_round,
-                },
-                None => return None,
-            };
-            let strong_parents = by_author.into_values().collect::<Vec<_>>();
-            debug_assert!(strong_parents.contains(&own_parent));
-            (strong_parents, leader_choice)
-        };
-
-        let mut delivery_frontier = self.projection.closed_frontier();
-        let own_entry = (own_prev.round != 0).then_some(own_prev);
-        // The enclosing carrier is not clean yet, so its immediate physical
-        // predecessor may be ahead of today's closed tip. The immutable
-        // declaration names that exact predecessor; projection later proves
-        // the intervening self-chain closed before accepting this vertex.
-        delivery_frontier.get(self.own_authority as usize)?;
-        delivery_frontier[self.own_authority as usize] = own_entry;
-        Some(ConsensusVertexV1::new(
-            consensus_round,
-            strong_parents,
-            delivery_frontier,
-            leader_choice,
-        ))
-    }
-
-    fn next_local_consensus_round(&self) -> RoundNumber {
-        let snapshot = self.journal.snapshot();
-        let mut round: RoundNumber = 1;
-        while snapshot.consensus_slot(round).is_some() {
-            round = round.saturating_add(1);
-        }
-        round
     }
 
     /// Verify and durably apply an authenticated network envelope for this
@@ -1169,7 +980,8 @@ impl StarfishRbcDagShadowV1 {
                     round: candidate.header().carrier_round(),
                     transactions_commitment: candidate.header().transactions_commitment(),
                     creation_time_ns: candidate.header().creation_time_ns(),
-                    control_shape: candidate.header().data_acknowledgments().is_empty(),
+                    control_shape: candidate.header().data_acknowledgments().is_empty()
+                        && candidate.header().consensus_vertex().is_none(),
                     application: candidate
                         .header()
                         .application_header()
@@ -1255,77 +1067,6 @@ impl StarfishRbcDagShadowV1 {
 
     pub(crate) fn shutdown(self) -> Result<ShadowWalSummaryV1, ShadowErrorV1> {
         Ok(self.wal.shutdown()?)
-    }
-
-    fn drive_certified_projection(&mut self) {
-        loop {
-            let mut advanced = false;
-            let candidates = self
-                .candidates
-                .iter()
-                .filter_map(|(reference, candidate)| {
-                    candidate
-                        .header()
-                        .consensus_vertex()
-                        .is_some()
-                        .then_some(*reference)
-                })
-                .collect::<Vec<_>>();
-            for reference in candidates {
-                let consensus_round = self
-                    .candidates
-                    .get(&reference)
-                    .and_then(|candidate| candidate.header().consensus_vertex())
-                    .expect("candidate list contains only consensus vertices")
-                    .consensus_round();
-                let vertex_reference = ConsensusVertexReference::new(reference, consensus_round);
-                if self.projection.is_projected(vertex_reference)
-                    || self.projection_rejected.contains_key(&reference)
-                {
-                    continue;
-                }
-                match self.projection.try_project(reference) {
-                    Ok(projected) => {
-                        self.pending_projected_vertices.push(projected);
-                        advanced = true;
-                    }
-                    Err(error) if projection_error_is_pending(&error) => {}
-                    Err(error) => {
-                        self.projection_rejected.insert(reference, error);
-                    }
-                }
-            }
-            if !advanced {
-                break;
-            }
-        }
-
-        let highest_round = self
-            .candidates
-            .values()
-            .filter_map(|candidate| candidate.header().consensus_vertex())
-            .map(ConsensusVertexV1::consensus_round)
-            .max()
-            .unwrap_or_default();
-        for round in 1..=highest_round.saturating_sub(2) {
-            let slot = self.projection.leader_slot(round);
-            if self
-                .projected_decisions
-                .iter()
-                .any(|decision| projection_decision_slot(*decision) == slot)
-            {
-                continue;
-            }
-            let Ok(decision) = self.projection.direct_decision(slot) else {
-                continue;
-            };
-            if matches!(decision, ProjectionDecisionV1::Undecided { .. }) {
-                continue;
-            }
-            if self.projected_decisions.insert(decision) {
-                self.pending_projection_decisions.push(decision);
-            }
-        }
     }
 
     fn ensure_live(&self) -> Result<(), ShadowErrorV1> {
@@ -1420,12 +1161,10 @@ impl StarfishRbcDagShadowV1 {
         input: &ShadowInputV1,
         batch_sequence: u64,
     ) -> Result<(), ShadowErrorV1> {
-        let reference = input.candidate().map(CandidateCarrierV1::reference);
-        let slot = reference.map(carrier_slot);
+        let reference = input.candidate().reference();
+        let slot = carrier_slot(reference);
         let violation = match input {
             ShadowInputV1::AuthenticatedIngress { .. } => {
-                let reference = reference.expect("authenticated ingress has a candidate");
-                let slot = slot.expect("authenticated ingress has a slot");
                 if round_is_stale(self.model.local_carrier_round(), reference.round) {
                     Some("stale authenticated ingress")
                 } else if self.authenticated_slots.contains_key(&slot) {
@@ -1435,8 +1174,6 @@ impl StarfishRbcDagShadowV1 {
                 }
             }
             ShadowInputV1::CandidateRetention(_) => {
-                let reference = reference.expect("candidate retention has a candidate");
-                let slot = slot.expect("candidate retention has a slot");
                 if round_is_stale(self.model.local_carrier_round(), reference.round) {
                     Some("stale candidate retention")
                 } else if self.candidates.contains_key(&reference)
@@ -1449,8 +1186,6 @@ impl StarfishRbcDagShadowV1 {
                 }
             }
             ShadowInputV1::CandidateRecovery(_) => {
-                let reference = reference.expect("candidate recovery has a candidate");
-                let slot = slot.expect("candidate recovery has a slot");
                 let limit = self
                     .committee
                     .committee()
@@ -1472,9 +1207,6 @@ impl StarfishRbcDagShadowV1 {
                 }
             }
             ShadowInputV1::LocalOutbound(_) => None,
-            ShadowInputV1::DataAvailable(reference) => {
-                (!self.candidates.contains_key(reference)).then_some("unknown available carrier")
-            }
         };
         if let Some(reason) = violation {
             return Err(ShadowErrorV1::ReplayPolicyViolation {
@@ -1486,41 +1218,26 @@ impl StarfishRbcDagShadowV1 {
     }
 
     fn record_committed_input(&mut self, input: &ShadowInputV1, effects: &[ModelEffect]) {
-        if let Some(candidate) = input.candidate().cloned() {
-            let reference = candidate.reference();
-            let slot = carrier_slot(reference);
-            self.projection
-                .stage_carrier(candidate.clone())
-                .expect("durably validated carrier must match projection committee");
-            if candidate.header().application_header().is_none() || input.is_local() {
-                self.projection
-                    .mark_data_available(reference)
-                    .expect("staged control carrier is available");
+        let candidate = input.candidate().clone();
+        let reference = candidate.reference();
+        let slot = carrier_slot(reference);
+        self.candidates.insert(reference, candidate);
+        self.slot_candidates
+            .entry(slot)
+            .or_default()
+            .insert(reference);
+        match input {
+            ShadowInputV1::AuthenticatedIngress { .. } | ShadowInputV1::LocalOutbound(_) => {
+                self.authenticated_slots.entry(slot).or_insert(reference);
             }
-            self.candidates.insert(reference, candidate);
-            self.slot_candidates
-                .entry(slot)
-                .or_default()
-                .insert(reference);
-            match input {
-                ShadowInputV1::AuthenticatedIngress { .. } | ShadowInputV1::LocalOutbound(_) => {
-                    self.authenticated_slots.entry(slot).or_insert(reference);
-                }
-                ShadowInputV1::CandidateRetention(_) => {
-                    self.ordinarily_retained_slots
-                        .entry(slot)
-                        .or_insert(reference);
-                }
-                ShadowInputV1::CandidateRecovery(_) => {}
-                ShadowInputV1::DataAvailable(_) => unreachable!("handled without a candidate"),
+            ShadowInputV1::CandidateRetention(_) => {
+                self.ordinarily_retained_slots
+                    .entry(slot)
+                    .or_insert(reference);
             }
-            self.requested_recoveries.remove(&reference);
+            ShadowInputV1::CandidateRecovery(_) => {}
         }
-        if let ShadowInputV1::DataAvailable(reference) = input {
-            self.projection
-                .mark_data_available(*reference)
-                .expect("model accepted availability only for a staged carrier");
-        }
+        self.requested_recoveries.remove(&reference);
         for effect in effects {
             match effect {
                 ModelEffect::NeedCarrier { target, holders } => {
@@ -1529,14 +1246,10 @@ impl StarfishRbcDagShadowV1 {
                 ModelEffect::Delivered(delivered) => {
                     self.delivered.insert(*delivered);
                     self.requested_recoveries.remove(delivered);
-                    self.projection
-                        .mark_delivered(*delivered)
-                        .expect("model delivery must name a staged carrier");
                 }
                 ModelEffect::PrefixAdvanced { .. } | ModelEffect::CarrierRoundAdvanced(_) => {}
             }
         }
-        self.drive_certified_projection();
     }
 
     fn decode_batch(&self, records: &[Vec<u8>]) -> Result<ShadowInputV1, ShadowErrorV1> {
@@ -1581,13 +1294,6 @@ impl StarfishRbcDagShadowV1 {
                 } else {
                     Ok(ShadowInputV1::CandidateRecovery(candidate))
                 }
-            }
-            RECORD_DATA_AVAILABLE => {
-                ensure_trace_tail(&decoded[1..])?;
-                let mut payload = RawDecoder::new(&decoded[0].payload);
-                let reference = payload.read_reference()?;
-                payload.finish()?;
-                Ok(ShadowInputV1::DataAvailable(reference))
             }
             RECORD_LOCAL_OUTBOUND_CONTENT => {
                 if decoded.len() != 4 {
@@ -1767,15 +1473,9 @@ fn validate_journal_transition(
                 candidate: authenticated.candidate().clone(),
             });
         }
-        ShadowInputV1::DataAvailable(_) => {}
     }
 
-    let local_reference = input.is_local().then(|| {
-        input
-            .candidate()
-            .expect("local input has candidate")
-            .reference()
-    });
+    let local_reference = input.is_local().then(|| input.candidate().reference());
     for entry in trace {
         let event = match entry {
             ModelTraceEvent::AdmissionLocked(target) if Some(*target) == local_reference => {
@@ -1829,22 +1529,6 @@ fn validate_journal_transition(
             ModelTraceEvent::LocalCarrierFixed(reference) => Some(JournalEventV1::FixOwnCarrier {
                 context,
                 reference: *reference,
-            }),
-            ModelTraceEvent::ConsensusSlotLocked {
-                consensus_round,
-                enclosing_carrier,
-            } => Some(JournalEventV1::LockConsensusSlot {
-                context,
-                consensus_round: *consensus_round,
-                enclosing_carrier: *enclosing_carrier,
-            }),
-            ModelTraceEvent::LeaderChoiceLocked {
-                consensus_round,
-                choice,
-            } => Some(JournalEventV1::LockLeaderChoice {
-                context,
-                consensus_round: *consensus_round,
-                choice: *choice,
             }),
             ModelTraceEvent::DeliveryLocked(target) => Some(JournalEventV1::LockDelivery {
                 context,
@@ -1921,16 +1605,6 @@ fn encode_batch(
                 own_authority,
                 RECORD_LOCAL_OUTBOUND_CONTENT,
                 &authenticated.candidate().canonical_wire_bytes()?,
-            )?);
-        }
-        ShadowInputV1::DataAvailable(reference) => {
-            let mut payload = Vec::new();
-            push_reference(&mut payload, *reference);
-            records.push(encode_raw_record(
-                context,
-                own_authority,
-                RECORD_DATA_AVAILABLE,
-                &payload,
             )?);
         }
     }
@@ -2149,22 +1823,6 @@ fn encode_trace(trace: &ModelTraceEvent) -> Result<Vec<u8>, ShadowCodecErrorV1> 
             bytes.push(TRACE_LOCAL_CARRIER_FIXED);
             push_reference(&mut bytes, *reference);
         }
-        ModelTraceEvent::ConsensusSlotLocked {
-            consensus_round,
-            enclosing_carrier,
-        } => {
-            bytes.push(TRACE_CONSENSUS_SLOT_LOCKED);
-            bytes.extend_from_slice(&consensus_round.to_be_bytes());
-            push_reference(&mut bytes, *enclosing_carrier);
-        }
-        ModelTraceEvent::LeaderChoiceLocked {
-            consensus_round,
-            choice,
-        } => {
-            bytes.push(TRACE_LEADER_CHOICE_LOCKED);
-            bytes.extend_from_slice(&consensus_round.to_be_bytes());
-            push_leader_choice(&mut bytes, *choice);
-        }
         ModelTraceEvent::DeliveryLocked(reference) => {
             bytes.push(TRACE_DELIVERY_LOCKED);
             push_reference(&mut bytes, *reference);
@@ -2197,14 +1855,6 @@ fn decode_trace(
             next_index: decoder.read_u32()? as usize,
         },
         TRACE_LOCAL_CARRIER_FIXED => ModelTraceEvent::LocalCarrierFixed(decoder.read_reference()?),
-        TRACE_CONSENSUS_SLOT_LOCKED => ModelTraceEvent::ConsensusSlotLocked {
-            consensus_round: decoder.read_u32()?,
-            enclosing_carrier: decoder.read_reference()?,
-        },
-        TRACE_LEADER_CHOICE_LOCKED => ModelTraceEvent::LeaderChoiceLocked {
-            consensus_round: decoder.read_u32()?,
-            choice: decoder.read_leader_choice()?,
-        },
         TRACE_DELIVERY_LOCKED => ModelTraceEvent::DeliveryLocked(decoder.read_reference()?),
         TRACE_EFFECT => ModelTraceEvent::Effect(decoder.read_effect(committee_size)?),
         other => return Err(ShadowCodecErrorV1::InvalidTrace(other)),
@@ -2251,28 +1901,6 @@ fn push_phase(bytes: &mut Vec<u8>, statement: RbcPhaseStatementV1) {
         RbcPhaseStatementV1::Ready { target } => {
             bytes.push(PHASE_READY);
             push_reference(bytes, target);
-        }
-    }
-}
-
-fn push_consensus_reference(bytes: &mut Vec<u8>, reference: ConsensusVertexReference) {
-    push_reference(bytes, reference.carrier());
-    bytes.extend_from_slice(&reference.consensus_round().to_be_bytes());
-}
-
-fn push_leader_choice(bytes: &mut Vec<u8>, choice: LeaderChoiceV1) {
-    match choice {
-        LeaderChoiceV1::Vote { leader } => {
-            bytes.push(0);
-            push_consensus_reference(bytes, leader);
-        }
-        LeaderChoiceV1::NoVote {
-            leader_author,
-            leader_round,
-        } => {
-            bytes.push(1);
-            bytes.extend_from_slice(&leader_author.to_be_bytes());
-            bytes.extend_from_slice(&leader_round.to_be_bytes());
         }
     }
 }
@@ -2357,30 +1985,6 @@ fn ambiguous_slots(
         .collect()
 }
 
-fn projection_error_is_pending(error: &CertifiedProjectionError) -> bool {
-    matches!(
-        error,
-        CertifiedProjectionError::CarrierNotDelivered(_)
-            | CertifiedProjectionError::CarrierDataUnavailable(_)
-            | CertifiedProjectionError::CarrierOutsideClosedPrefix(_)
-            | CertifiedProjectionError::MissingStrongParent(_)
-            | CertifiedProjectionError::FrontierNotClosed { .. }
-    )
-}
-
-fn projection_decision_slot(decision: ProjectionDecisionV1) -> LeaderSlotV1 {
-    match decision {
-        ProjectionDecisionV1::DirectCommit { leader }
-        | ProjectionDecisionV1::IndirectCommit { leader, .. } => LeaderSlotV1 {
-            author: leader.author(),
-            round: leader.consensus_round(),
-        },
-        ProjectionDecisionV1::DirectSkip { slot }
-        | ProjectionDecisionV1::IndirectSkip { slot, .. }
-        | ProjectionDecisionV1::Undecided { slot } => slot,
-    }
-}
-
 struct RawDecoder<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -2443,25 +2047,6 @@ impl<'a> RawDecoder<'a> {
             PHASE_ECHO => Ok(RbcPhaseStatementV1::Echo { target }),
             PHASE_READY => Ok(RbcPhaseStatementV1::Ready { target }),
             other => Err(ShadowCodecErrorV1::InvalidPhase(other)),
-        }
-    }
-
-    fn read_consensus_reference(&mut self) -> Result<ConsensusVertexReference, ShadowCodecErrorV1> {
-        let carrier = self.read_reference()?;
-        let consensus_round = self.read_u32()?;
-        Ok(ConsensusVertexReference::new(carrier, consensus_round))
-    }
-
-    fn read_leader_choice(&mut self) -> Result<LeaderChoiceV1, ShadowCodecErrorV1> {
-        match self.read_u8()? {
-            0 => Ok(LeaderChoiceV1::Vote {
-                leader: self.read_consensus_reference()?,
-            }),
-            1 => Ok(LeaderChoiceV1::NoVote {
-                leader_author: self.read_u16()?,
-                leader_round: self.read_u32()?,
-            }),
-            other => Err(ShadowCodecErrorV1::InvalidLeaderChoice(other)),
         }
     }
 
@@ -2670,7 +2255,7 @@ mod tests {
         assert_eq!(node.local_outbound_envelope(1), None);
 
         let before = node.wal_counts();
-        let (heartbeat, effects) = node.create_local_control_heartbeat(123, true).unwrap();
+        let (heartbeat, effects) = node.create_local_control_heartbeat(123).unwrap();
         assert!(effects.is_empty());
         assert_eq!(node.wal_counts().0, before.0 + 1);
         let candidate = decode_candidate(
@@ -2688,19 +2273,7 @@ mod tests {
         assert_eq!(candidate.header().creation_time_ns(), 123);
         assert!(candidate.header().data_acknowledgments().is_empty());
         assert!(candidate.header().phase_batch().is_empty());
-        let vertex = candidate
-            .header()
-            .consensus_vertex()
-            .expect("first autonomous heartbeat carries the genesis projection");
-        assert_eq!(vertex.consensus_round(), 1);
-        assert_eq!(
-            node.journal.snapshot().consensus_slot(1),
-            Some(heartbeat.reference())
-        );
-        assert_eq!(
-            node.journal.snapshot().leader_choice(1),
-            Some(vertex.leader_choice())
-        );
+        assert!(candidate.header().consensus_vertex().is_none());
         assert_eq!(node.local_outbound_envelope(1), Some(heartbeat.clone()));
         assert_eq!(node.local_outbound_envelope(2), None);
         assert_eq!(
@@ -2716,7 +2289,7 @@ mod tests {
 
         let durable_counts = node.wal_counts();
         assert!(matches!(
-            node.create_local_control_heartbeat(124, true),
+            node.create_local_control_heartbeat(124),
             Err(ShadowErrorV1::Model(ModelError::LocalCarrierAlreadyFixed(
                 1
             )))
@@ -2732,7 +2305,7 @@ mod tests {
     fn autonomous_control_heartbeat_advances_sequentially_and_reopens_exact_bytes() {
         let mut network = TestNetwork::new();
         let first = network.nodes[0]
-            .create_local_control_heartbeat(1_000, true)
+            .create_local_control_heartbeat(1_000)
             .unwrap()
             .0;
         for author in [1, 2] {
@@ -2761,7 +2334,7 @@ mod tests {
         assert_eq!(network.nodes[0].current_round_admitted_author_count(), 0);
 
         let second = network.nodes[0]
-            .create_local_control_heartbeat(2_000, true)
+            .create_local_control_heartbeat(2_000)
             .unwrap()
             .0;
         let second_candidate = decode_candidate(
@@ -2801,15 +2374,6 @@ mod tests {
         assert!(!restarted.can_create_carrier());
         assert_eq!(restarted.local_outbound_envelope(1), Some(first));
         assert_eq!(restarted.local_outbound_envelope(2), Some(second));
-        let first_reference = restarted
-            .local_outbound_envelope(1)
-            .expect("round one survived restart")
-            .reference();
-        assert_eq!(
-            restarted.journal.snapshot().consensus_slot(1),
-            Some(first_reference)
-        );
-        assert!(restarted.journal.snapshot().leader_choice(1).is_some());
     }
 
     #[test]

@@ -63,13 +63,13 @@ pub struct Opts {
     #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac", global = true)]
     block_authentication: Option<String>,
 
-    /// Enable the persisted Starfish-RBC-DAG research runtime. Without the
-    /// autonomous flag it remains comparison-only.
+    /// Run the embedded Starfish-RBC-DAG implementation as a non-authoritative
+    /// shadow.
     #[clap(long, global = true)]
     starfish_rbc_dag_shadow: bool,
 
-    /// Run the independent Starfish-RBC-DAG carrier clock and certified
-    /// projection. Requires `--starfish-rbc-dag-shadow`.
+    /// Let the non-authoritative Starfish-RBC-DAG shadow create its own
+    /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
     #[clap(long, global = true)]
     starfish_rbc_dag_autonomous_clock: bool,
 

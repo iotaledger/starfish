@@ -72,12 +72,12 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
-        /// Enable the persisted RBC-DAG research runtime alongside
-        /// `starfish-rbc` (comparison-only unless autonomous mode is enabled).
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_shadow: bool,
-        /// Run the independent Starfish-RBC-DAG carrier clock and certified
-        /// projection. Requires `--starfish-rbc-dag-shadow`.
+        /// Let the non-authoritative Starfish-RBC-DAG shadow create its own
+        /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
         /// Let embedded carrier ECHO/READY delivery certify application
@@ -117,12 +117,12 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
-        /// Enable the persisted RBC-DAG research runtime alongside
-        /// `starfish-rbc` (comparison-only unless autonomous mode is enabled).
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_shadow: bool,
-        /// Run the independent Starfish-RBC-DAG carrier clock and certified
-        /// projection. Requires `--starfish-rbc-dag-shadow`.
+        /// Let the non-authoritative Starfish-RBC-DAG shadow create its own
+        /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
         /// Let embedded carrier ECHO/READY delivery certify application
@@ -184,12 +184,12 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
-        /// Enable the persisted RBC-DAG research runtime alongside
-        /// `starfish-rbc` (comparison-only unless autonomous mode is enabled).
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_shadow: bool,
-        /// Run the independent Starfish-RBC-DAG carrier clock and certified
-        /// projection. Requires `--starfish-rbc-dag-shadow`.
+        /// Let the non-authoritative Starfish-RBC-DAG shadow create its own
+        /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
         /// Let embedded carrier ECHO/READY delivery certify application

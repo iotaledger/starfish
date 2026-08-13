@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::{
-    AuthenticatedCarrierV1, CandidateCarrierV1, LeaderChoiceV1, LocallyAuthenticatedCarrierV1,
+    AuthenticatedCarrierV1, CandidateCarrierV1, LocallyAuthenticatedCarrierV1,
     MAX_PHASE_STATEMENTS_V1, RbcDagCommitteeId, RbcDagContextV1, RbcPhaseStatementV1,
     carrier_genesis_reference,
 };
@@ -91,19 +91,6 @@ pub enum ModelTraceEvent {
     },
     /// The local author fixed one exact carrier before authorizing its ECHO.
     LocalCarrierFixed(BlockReference),
-    /// The optional consensus vertex became the author's immutable value for
-    /// its logical consensus round. This follows fixing the enclosing carrier
-    /// and precedes any outbound exposure.
-    ConsensusSlotLocked {
-        consensus_round: RoundNumber,
-        enclosing_carrier: BlockReference,
-    },
-    /// The local Vote/NoVote choice embedded in the fixed consensus vertex
-    /// became immutable before the carrier can be exposed.
-    LeaderChoiceLocked {
-        consensus_round: RoundNumber,
-        choice: LeaderChoiceV1,
-    },
     /// Bracha delivery became slot-global and immutable.
     DeliveryLocked(BlockReference),
     /// Existing non-durable output retained in its exact reducer order.
@@ -675,16 +662,6 @@ impl RbcDagModel {
         self.preflight_receive(&carrier)?;
         self.own_fixed.insert(round, reference);
         log.proof(ModelTraceEvent::LocalCarrierFixed(reference));
-        if let Some(vertex) = header.consensus_vertex() {
-            log.proof(ModelTraceEvent::ConsensusSlotLocked {
-                consensus_round: vertex.consensus_round(),
-                enclosing_carrier: reference,
-            });
-            log.proof(ModelTraceEvent::LeaderChoiceLocked {
-                consensus_round: vertex.consensus_round(),
-                choice: vertex.leader_choice(),
-            });
-        }
         for statement in &expected_phase_batch {
             self.pending_phase_set.remove(statement);
         }
