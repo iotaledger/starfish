@@ -7,7 +7,12 @@
 //! supplies content-validated headers and expands typed multicast effects into
 //! recipient-specific messages.
 
-use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -16,15 +21,14 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
     crypto::{
         Blake3Hasher, MacKey, MacTag, MlDsa44SignatureBytes, MlDsa65SignatureBytes, SignatureBytes,
-        TransactionsCommitment, bls_aggregate, bls_fast_aggregate_verify,
-        bls_public_keys_for_signers, bls_try_aggregate,
+        TransactionsCommitment,
     },
     types::{
         AckFields, AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme,
         BlockDigest, BlockHeader, BlockReference, MAX_COMMITTEE_SIZE, RoundNumber, Stake,
-        StarfishRbcEchoQcV3, StarfishRbcEchoVoteV3, StarfishRbcFieldsV3,
-        StarfishRbcReferenceKindV3, StarfishRbcReferenceV3, TimestampNs, TransactionData,
-        VerifiedBlock, compress_acknowledgments, expand_acknowledgments,
+        StarfishRbcEchoQcV3, StarfishRbcFieldsV3, StarfishRbcReferenceKindV3,
+        StarfishRbcReferenceV3, TimestampNs, TransactionData, VerifiedBlock,
+        compress_acknowledgments, expand_acknowledgments,
     },
 };
 
@@ -33,7 +37,6 @@ const COMMITTEE_ID_DERIVE_CONTEXT: &str = "STARFISH_RBC_V1_COMMITTEE_ID";
 const INITIAL_KIND: u8 = 0x00;
 const ECHO_KIND: u8 = 0x01;
 const READY_KIND: u8 = 0x02;
-const PORTABLE_ECHO_KIND: u8 = 0x03;
 
 const PROTOCOL_INSTANCE_SIZE: usize = 32;
 const COMMITTEE_ID_SIZE: usize = 32;
@@ -527,21 +530,16 @@ impl RbcCanonicalHeader {
             })
             .ok_or(RbcError::HeaderContentTooLarge)?;
         let portable_echo_bytes = self.starfish_rbc_v3.as_ref().map_or(0, |rbc| {
-            let vote_bytes: usize = rbc
-                .echo_votes()
-                .iter()
-                .map(|vote| RBC_BLOCK_REFERENCE_SIZE + 2 + vote.signature().as_ref().len())
-                .sum();
             let qc_bytes: usize = rbc
                 .echo_qcs()
                 .iter()
                 .map(|qc| {
                     RBC_BLOCK_REFERENCE_SIZE
-                        + qc.signers().words().len() * std::mem::size_of::<u64>()
-                        + qc.signature().as_ref().len()
+                        + std::mem::size_of::<u32>()
+                        + qc.witnesses().len() * RBC_BLOCK_REFERENCE_SIZE
                 })
                 .sum();
-            vote_bytes.saturating_add(qc_bytes)
+            qc_bytes
         });
         RBC_BLOCK_REFERENCE_SIZE
             .checked_mul(reference_count)
@@ -601,9 +599,14 @@ pub enum RbcInitialProof {
     MlDsa44(MlDsa44SignatureBytes),
     MlDsa65(MlDsa65SignatureBytes),
     Mac(MacTag),
+    /// Complete author-generated MAC vector. Unlike a single recipient tag,
+    /// this proof may be relayed: each receiver verifies only its own entry.
+    MacVector(Vec<MacTag>),
 }
 
-/// Direct-author Starfish-RBC header proposal carried on the wire.
+/// Starfish-RBC header proposal carried on the wire. Recipient-tag proofs are
+/// direct-author-only; a complete MAC-vector proof may be relayed during exact
+/// witness recovery.
 ///
 /// The proof is a sidecar over the canonical header reference. It is not part
 /// of the content-addressed header identity.
@@ -687,9 +690,11 @@ impl RbcInitialProof {
             BlockAuthentication::MlDsa44(signature) => Ok(Self::MlDsa44(signature.clone())),
             BlockAuthentication::MlDsa65(signature) => Ok(Self::MlDsa65(signature.clone())),
             BlockAuthentication::MacTag(tag) => Ok(Self::Mac(*tag)),
-            BlockAuthentication::None | BlockAuthentication::MacVector(_) => {
-                Err(RbcError::InvalidInitialProof)
+            BlockAuthentication::MacVector(tags) if !tags.is_empty() => {
+                Ok(Self::MacVector(tags.clone()))
             }
+            BlockAuthentication::MacVector(_) => Err(RbcError::InvalidInitialProof),
+            BlockAuthentication::None => Err(RbcError::InvalidInitialProof),
         }
     }
 }
@@ -913,7 +918,6 @@ pub(crate) enum RbcEffect {
         holders: AuthoritySet,
     },
     Deliver(PinnedRbcHeader),
-    PortableEchoVote(BlockReference),
     PortableEchoQc(StarfishRbcEchoQcV3),
 }
 
@@ -981,7 +985,6 @@ pub(crate) enum RbcError {
     DuplicateAcknowledgment(BlockReference),
     InvalidThresholdClock,
     InvalidSingleDagEvidence,
-    InvalidPortableEchoVote,
     InvalidPortableEchoQc,
     HeaderDigestMismatch {
         expected: BlockDigest,
@@ -1124,9 +1127,6 @@ impl fmt::Display for RbcError {
             Self::InvalidSingleDagEvidence => {
                 f.write_str("Starfish-RBC V3 block carries non-canonical reference evidence")
             }
-            Self::InvalidPortableEchoVote => {
-                f.write_str("Starfish-RBC V3 block carries an invalid portable ECHO vote")
-            }
             Self::InvalidPortableEchoQc => {
                 f.write_str("Starfish-RBC V3 block carries an invalid portable ECHO-QC")
             }
@@ -1212,8 +1212,12 @@ struct CandidateState {
     ready_validity_observed: bool,
     ready_quorum_observed: bool,
     header_request_holders: AuthoritySet,
-    portable_echo_votes: BTreeMap<AuthorityIndex, StarfishRbcEchoVoteV3>,
-    portable_echo_votes_verified: bool,
+    /// Exact authenticated ordinary blocks whose authors carried
+    /// `ECHO(this candidate)`. These references are the signature-free QC
+    /// witnesses; no standalone vote object exists.
+    portable_echo_witnesses: BTreeMap<AuthorityIndex, BlockReference>,
+    pending_portable_echo_qc: Option<StarfishRbcEchoQcV3>,
+    portable_echo_qc_holders: AuthoritySet,
     portable_echo_qc_emitted: bool,
     portable_echo_qc_observed: bool,
 }
@@ -1228,8 +1232,9 @@ impl CandidateState {
             ready_validity_observed: false,
             ready_quorum_observed: false,
             header_request_holders: AuthoritySet::default(),
-            portable_echo_votes: BTreeMap::new(),
-            portable_echo_votes_verified: false,
+            portable_echo_witnesses: BTreeMap::new(),
+            pending_portable_echo_qc: None,
+            portable_echo_qc_holders: AuthoritySet::default(),
             portable_echo_qc_emitted: false,
             portable_echo_qc_observed: false,
         }
@@ -1295,7 +1300,7 @@ enum ProgressAction {
     NeedHeader(AuthoritySet),
     SendReady,
     Deliver,
-    EmitPortableEchoQc(Vec<StarfishRbcEchoVoteV3>),
+    EmitPortableEchoQc(Vec<BlockReference>),
     None,
 }
 
@@ -1306,10 +1311,14 @@ pub(crate) struct StarfishRbcKernel {
     mac_keys: Arc<Vec<MacKey>>,
     local_round: RoundNumber,
     minimum_new_slot_round: RoundNumber,
-    /// Testbed portable fast path. Public ECHO signatures are copied into a
-    /// quorum certificate carried by an ordinary single-DAG block.
+    /// Testbed portable fast path. Exact MAC-vector-authenticated ordinary
+    /// blocks carrying ECHO are named by a quorum certificate in a later
+    /// ordinary single-DAG block.
     echo_qc_fast_path: bool,
     slots: BTreeMap<RoundNumber, AHashMap<AuthorityIndex, SlotState>>,
+    /// Reverse dependency index for QCs received before every exact witness
+    /// block is locally authenticated. Each set is committee-bounded.
+    portable_qc_waiters: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
 }
 
 impl StarfishRbcKernel {
@@ -1361,6 +1370,7 @@ impl StarfishRbcKernel {
             minimum_new_slot_round: 1,
             echo_qc_fast_path,
             slots: BTreeMap::new(),
+            portable_qc_waiters: BTreeMap::new(),
         })
     }
 
@@ -1434,7 +1444,8 @@ impl StarfishRbcKernel {
         header.ensure_committee(self.context.committee_id)?;
         let block_ref = header.reference();
         self.validate_block_ref(&block_ref)?;
-        if direct_peer != block_ref.authority {
+        let portable_mac_vector = matches!(proof, RbcInitialProof::MacVector(_));
+        if direct_peer != block_ref.authority && !portable_mac_vector {
             return Err(RbcError::InitialAuthorMismatch {
                 expected: block_ref.authority,
                 actual: direct_peer,
@@ -1477,6 +1488,9 @@ impl StarfishRbcKernel {
             }
             (BlockAuthenticationScheme::MacVector, RbcInitialProof::Mac(tag)) => {
                 self.verify_initial_mac_tag(direct_peer, block_ref, tag)?;
+            }
+            (BlockAuthenticationScheme::MacVector, RbcInitialProof::MacVector(tags)) => {
+                self.verify_initial_mac_vector(block_ref, tags)?;
             }
             _ => return Err(RbcError::InitialProofSchemeMismatch),
         }
@@ -1597,7 +1611,7 @@ impl StarfishRbcKernel {
     ) -> Result<RbcInitialHeaderOutcome, RbcError> {
         let pinned = self.validate_header_content(header)?;
         let block_ref = pinned.reference();
-        if direct_peer != block_ref.authority {
+        if direct_peer != block_ref.authority && !matches!(proof, RbcInitialProof::MacVector(_)) {
             return Err(RbcError::InitialAuthorMismatch {
                 expected: block_ref.authority,
                 actual: direct_peer,
@@ -1679,15 +1693,12 @@ impl StarfishRbcKernel {
             .echoes
             .add(own_authority, &committee);
 
-        let mut effects = vec![if self.echo_qc_fast_path {
-            RbcEffect::PortableEchoVote(block_ref)
-        } else {
-            RbcEffect::MulticastPhase {
-                phase: RbcPhase::Echo,
-                block_ref,
-            }
+        let mut effects = vec![RbcEffect::MulticastPhase {
+            phase: RbcPhase::Echo,
+            block_ref,
         }];
         effects.extend(self.drive(block_ref));
+        effects.extend(self.retry_portable_qcs_waiting_on(block_ref));
         Ok(effects)
     }
 
@@ -1723,10 +1734,14 @@ impl StarfishRbcKernel {
     pub(crate) fn handle_embedded_reference(
         &mut self,
         authenticated_sender: AuthorityIndex,
+        enclosing_block: BlockReference,
         evidence: StarfishRbcReferenceV3,
     ) -> Result<Vec<RbcEffect>, RbcError> {
         if !self.committee.known_authority(authenticated_sender) {
             return Err(RbcError::UnknownAuthority(authenticated_sender));
+        }
+        if enclosing_block.authority != authenticated_sender {
+            return Err(RbcError::InvalidPortableEchoQc);
         }
         let block_ref = evidence.reference();
         self.validate_block_ref(&block_ref)?;
@@ -1734,10 +1749,28 @@ impl StarfishRbcKernel {
             StarfishRbcReferenceKindV3::Echo => RbcPhase::Echo,
             StarfishRbcReferenceKindV3::Ready => RbcPhase::Ready,
         };
+        let echo_qc_fast_path = self.echo_qc_fast_path;
         let committee = Arc::clone(&self.committee);
         let slot = self.slot_mut(block_ref);
+        if phase == RbcPhase::Echo && echo_qc_fast_path {
+            let candidate = slot
+                .candidates
+                .entry(block_ref)
+                .or_insert_with(CandidateState::new);
+            match candidate.portable_echo_witnesses.get(&authenticated_sender) {
+                Some(existing) if *existing != enclosing_block => {
+                    return Err(RbcError::InvalidPortableEchoQc);
+                }
+                Some(_) => {}
+                None => {
+                    candidate
+                        .portable_echo_witnesses
+                        .insert(authenticated_sender, enclosing_block);
+                }
+            }
+        }
         if !slot.record_phase_sender(phase, authenticated_sender, block_ref) {
-            return Ok(Vec::new());
+            return Ok(self.drive(block_ref));
         }
         let candidate = slot
             .candidates
@@ -1754,126 +1787,16 @@ impl StarfishRbcKernel {
         Ok(self.drive(block_ref))
     }
 
-    /// Digest signed by an ECHO sender for the portable single-DAG fast path.
-    /// The protocol instance and committee identifier prevent cross-run reuse.
-    pub(crate) fn portable_echo_signature_digest(
-        &self,
-        target: BlockReference,
-    ) -> Result<[u8; 32], RbcError> {
-        self.validate_block_ref(&target)?;
-        Ok(blake3::hash(&encode_base_statement(
-            &self.context,
-            PORTABLE_ECHO_KIND,
-            &target,
-        ))
-        .into())
-    }
-
-    pub(crate) fn handle_portable_echo_vote(
-        &mut self,
-        vote: StarfishRbcEchoVoteV3,
-    ) -> Result<Vec<RbcEffect>, RbcError> {
-        if !self.echo_qc_fast_path {
-            return Err(RbcError::InvalidPortableEchoVote);
-        }
-        self.validate_block_ref(&vote.target())?;
-        if self
-            .candidate(&vote.target())
-            .is_some_and(|candidate| candidate.portable_echo_votes_verified)
-        {
-            return Ok(Vec::new());
-        }
-        let candidate = self.candidate_mut(vote.target());
-        match candidate.portable_echo_votes.get(&vote.sender()) {
-            Some(existing) if existing != &vote => return Err(RbcError::InvalidPortableEchoVote),
-            Some(_) => return Ok(Vec::new()),
-            None => {
-                candidate.portable_echo_votes.insert(vote.sender(), vote);
-            }
-        }
-        self.verify_portable_echo_vote_batch(vote.target())?;
-        Ok(self.drive(vote.target()))
-    }
-
-    fn verify_portable_echo_vote_batch(&mut self, target: BlockReference) -> Result<(), RbcError> {
-        let votes: Vec<_> = self
-            .candidate(&target)
-            .into_iter()
-            .flat_map(|candidate| candidate.portable_echo_votes.values().copied())
-            .collect();
-        let stake: Stake = votes
-            .iter()
-            .map(|vote| self.committee.get_stake(vote.sender()).unwrap_or_default())
-            .sum();
-        if !self.committee.is_quorum(stake) {
-            return Ok(());
-        }
-        let digest = self.portable_echo_signature_digest(target)?;
-        let batch_valid = |votes: &[StarfishRbcEchoVoteV3]| {
-            let mut signers = AuthoritySet::default();
-            for vote in votes {
-                signers.insert(vote.sender());
-            }
-            let signatures: Vec<_> = votes.iter().map(|vote| vote.signature()).collect();
-            let signature_refs: Vec<_> = signatures.iter().collect();
-            let Some(aggregate) = bls_try_aggregate(&signature_refs) else {
-                return false;
-            };
-            let Some(public_keys) = bls_public_keys_for_signers(&self.committee, signers) else {
-                return false;
-            };
-            bls_fast_aggregate_verify(&digest, &aggregate, &public_keys)
-        };
-        let valid_votes = if batch_valid(&votes) {
-            votes
-        } else {
-            votes
-                .into_iter()
-                .filter(|vote| {
-                    self.committee
-                        .get_bls_public_key(vote.sender())
-                        .is_some_and(|public_key| {
-                            public_key
-                                .verify_trusted(&digest, &vote.signature())
-                                .is_ok()
-                        })
-                })
-                .collect()
-        };
-        let valid_stake: Stake = valid_votes
-            .iter()
-            .map(|vote| self.committee.get_stake(vote.sender()).unwrap_or_default())
-            .sum();
-        let committee = Arc::clone(&self.committee);
-        let slot = self.slot_mut(target);
-        if committee.is_quorum(valid_stake) {
-            for vote in &valid_votes {
-                slot.record_phase_sender(RbcPhase::Echo, vote.sender(), target);
-            }
-        }
-        let candidate = slot
-            .candidates
-            .entry(target)
-            .or_insert_with(CandidateState::new);
-        candidate.portable_echo_votes = valid_votes
-            .iter()
-            .map(|vote| (vote.sender(), *vote))
-            .collect();
-        if committee.is_quorum(valid_stake) {
-            candidate.portable_echo_votes_verified = true;
-            for vote in valid_votes {
-                candidate.echoes.add(vote.sender(), &committee);
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn handle_portable_echo_qc(
         &mut self,
+        authenticated_sender: AuthorityIndex,
         qc: &StarfishRbcEchoQcV3,
     ) -> Result<Vec<RbcEffect>, RbcError> {
         if !self.echo_qc_fast_path {
             return Err(RbcError::InvalidPortableEchoQc);
+        }
+        if !self.committee.known_authority(authenticated_sender) {
+            return Err(RbcError::UnknownAuthority(authenticated_sender));
         }
         self.validate_block_ref(&qc.target())?;
         if self
@@ -1882,45 +1805,139 @@ impl StarfishRbcKernel {
         {
             return Ok(self.drive(qc.target()));
         }
+        self.validate_portable_echo_qc_shape(qc)?;
+        let candidate = self.candidate_mut(qc.target());
+        candidate
+            .portable_echo_qc_holders
+            .insert(authenticated_sender);
+        match candidate.pending_portable_echo_qc.as_ref() {
+            Some(existing) if existing <= qc => {}
+            _ => candidate.pending_portable_echo_qc = Some(qc.clone()),
+        }
+        Ok(self.try_complete_portable_echo_qc(qc.target()))
+    }
+
+    fn validate_portable_echo_qc_shape(&self, qc: &StarfishRbcEchoQcV3) -> Result<(), RbcError> {
+        if qc.witnesses().is_empty()
+            || qc.witnesses().len() > self.committee.len()
+            || qc.witnesses().windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(RbcError::InvalidPortableEchoQc);
+        }
+        let mut authors = AuthoritySet::default();
         let mut stake = 0;
-        for sender in qc.signers().present() {
+        for witness in qc.witnesses() {
+            self.validate_block_ref(witness)?;
+            if witness.round <= qc.target().round || authors.contains(witness.authority) {
+                return Err(RbcError::InvalidPortableEchoQc);
+            }
+            authors.insert(witness.authority);
             stake += self
                 .committee
-                .get_stake(sender)
+                .get_stake(witness.authority)
                 .ok_or(RbcError::InvalidPortableEchoQc)?;
         }
         if !self.committee.is_quorum(stake) {
             return Err(RbcError::InvalidPortableEchoQc);
         }
-        let public_keys = bls_public_keys_for_signers(&self.committee, qc.signers())
-            .ok_or(RbcError::InvalidPortableEchoQc)?;
-        if !bls_fast_aggregate_verify(
-            &self.portable_echo_signature_digest(qc.target())?,
-            &qc.signature(),
-            &public_keys,
-        ) {
-            return Err(RbcError::InvalidPortableEchoQc);
+        Ok(())
+    }
+
+    fn authenticated_witness_carries_echo(
+        &self,
+        witness: BlockReference,
+        target: BlockReference,
+    ) -> Option<bool> {
+        let slot = self.slot(&witness)?;
+        if slot.echoed != Some(witness) {
+            return None;
         }
-        let candidate = self.candidate_mut(qc.target());
+        let header = slot.candidates.get(&witness)?.header.as_ref()?;
+        Some(header.header().starfish_rbc_v3().is_some_and(|fields| {
+            fields
+                .references()
+                .binary_search(&StarfishRbcReferenceV3::new(
+                    StarfishRbcReferenceKindV3::Echo,
+                    target,
+                ))
+                .is_ok()
+        }))
+    }
+
+    fn try_complete_portable_echo_qc(&mut self, target: BlockReference) -> Vec<RbcEffect> {
+        let Some((qc, holders)) = self.candidate(&target).and_then(|candidate| {
+            candidate
+                .pending_portable_echo_qc
+                .clone()
+                .map(|qc| (qc, candidate.portable_echo_qc_holders))
+        }) else {
+            return Vec::new();
+        };
+
+        let mut missing = Vec::new();
+        for witness in qc.witnesses() {
+            match self.authenticated_witness_carries_echo(*witness, target) {
+                Some(true) => {}
+                Some(false) => {
+                    self.candidate_mut(target).pending_portable_echo_qc = None;
+                    return Vec::new();
+                }
+                None => missing.push(*witness),
+            }
+        }
+        if !missing.is_empty() {
+            for witness in &missing {
+                self.portable_qc_waiters
+                    .entry(*witness)
+                    .or_default()
+                    .insert(target);
+            }
+            return missing
+                .into_iter()
+                .map(|block_ref| RbcEffect::NeedHeader { block_ref, holders })
+                .collect();
+        }
+
+        for witness in qc.witnesses() {
+            if let Some(waiters) = self.portable_qc_waiters.get_mut(witness) {
+                waiters.remove(&target);
+                if waiters.is_empty() {
+                    self.portable_qc_waiters.remove(witness);
+                }
+            }
+        }
+        let candidate = self.candidate_mut(target);
+        candidate.pending_portable_echo_qc = None;
         candidate.portable_echo_qc_observed = true;
         let relay = if candidate.portable_echo_qc_emitted {
             None
         } else {
             candidate.portable_echo_qc_emitted = true;
-            Some(RbcEffect::PortableEchoQc(qc.clone()))
+            Some(RbcEffect::PortableEchoQc(qc))
         };
         let mut effects = relay.into_iter().collect::<Vec<_>>();
-        effects.extend(self.drive(qc.target()));
+        effects.extend(self.drive(target));
         if self
-            .candidate(&qc.target())
+            .candidate(&target)
             .is_some_and(|candidate| candidate.header.is_none())
         {
             effects.push(RbcEffect::NeedHeader {
-                block_ref: qc.target(),
-                holders: qc.signers(),
+                block_ref: target,
+                holders,
             });
         }
-        Ok(effects)
+        effects
+    }
+
+    fn retry_portable_qcs_waiting_on(&mut self, witness: BlockReference) -> Vec<RbcEffect> {
+        let targets = self
+            .portable_qc_waiters
+            .remove(&witness)
+            .unwrap_or_default();
+        targets
+            .into_iter()
+            .flat_map(|target| self.try_complete_portable_echo_qc(target))
+            .collect()
     }
 
     /// Materialize one recipient-specific message for an untagged multicast
@@ -2020,6 +2037,26 @@ impl StarfishRbcKernel {
         self.make_initial_mac_tag_for_reference(block_ref, recipient)
     }
 
+    pub(crate) fn make_local_initial_mac_vector(
+        &self,
+        local: &RbcLocalInitial,
+    ) -> Result<Vec<MacTag>, RbcError> {
+        let block_ref = self.ensure_local_initial(local)?;
+        if self.context.initial_authentication != BlockAuthenticationScheme::MacVector {
+            return Err(RbcError::InitialMacRequiresMacAuthentication);
+        }
+        self.committee
+            .authorities()
+            .map(|recipient| {
+                if recipient == self.own_authority {
+                    Ok(MacTag::from_bytes([0; crate::crypto::MAC_TAG_SIZE]))
+                } else {
+                    self.make_initial_mac_tag_for_reference(block_ref, recipient)
+                }
+            })
+            .collect()
+    }
+
     fn make_initial_mac_tag_for_reference(
         &self,
         block_ref: BlockReference,
@@ -2080,6 +2117,35 @@ impl StarfishRbcKernel {
         );
         let expected = self.mac_keys[direct_peer as usize].compute_rbc_tag(&statement);
         if expected != *tag {
+            return Err(RbcError::InvalidInitialTag);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_initial_mac_vector(
+        &self,
+        block_ref: BlockReference,
+        tags: &[MacTag],
+    ) -> Result<(), RbcError> {
+        if self.context.initial_authentication != BlockAuthenticationScheme::MacVector {
+            return Err(RbcError::InitialMacRequiresMacAuthentication);
+        }
+        self.validate_block_ref(&block_ref)?;
+        if tags.len() != self.committee.len() {
+            return Err(RbcError::InvalidInitialProof);
+        }
+        if block_ref.authority == self.own_authority {
+            return Err(RbcError::LoopbackPhase);
+        }
+        let statement = encode_mac_statement(
+            &self.context,
+            INITIAL_KIND,
+            &block_ref,
+            block_ref.authority,
+            self.own_authority,
+        );
+        let expected = self.mac_keys[block_ref.authority as usize].compute_rbc_tag(&statement);
+        if tags[self.own_authority as usize] != expected {
             return Err(RbcError::InvalidInitialTag);
         }
         Ok(())
@@ -2260,15 +2326,14 @@ impl StarfishRbcKernel {
 
                 let ready_trigger =
                     candidate.echo_quorum_observed || candidate.ready_validity_observed;
-                let portable_vote_stake = candidate
-                    .portable_echo_votes
+                let portable_witness_stake = candidate
+                    .portable_echo_witnesses
                     .keys()
                     .map(|sender| committee.get_stake(*sender).unwrap_or_default())
                     .sum::<Stake>();
                 let portable_qc_ready = echo_qc_fast_path
                     && !candidate.portable_echo_qc_emitted
-                    && candidate.portable_echo_votes_verified
-                    && committee.is_quorum(portable_vote_stake);
+                    && committee.is_quorum(portable_witness_stake);
                 let blocked_on_header = candidate.header.is_none()
                     && ((can_send_ready && ready_trigger)
                         || (can_deliver
@@ -2277,7 +2342,11 @@ impl StarfishRbcKernel {
                 let holders = candidate.holders();
                 if portable_qc_ready {
                     ProgressAction::EmitPortableEchoQc(
-                        candidate.portable_echo_votes.values().copied().collect(),
+                        candidate
+                            .portable_echo_witnesses
+                            .values()
+                            .copied()
+                            .collect(),
                     )
                 } else if blocked_on_header && holders != candidate.header_request_holders {
                     candidate.header_request_holders = holders;
@@ -2335,7 +2404,7 @@ impl StarfishRbcKernel {
                         effects.push(RbcEffect::Deliver(header));
                     }
                 }
-                ProgressAction::EmitPortableEchoQc(votes) => {
+                ProgressAction::EmitPortableEchoQc(witnesses) => {
                     let candidate = self.candidate_mut(block_ref);
                     if !candidate.portable_echo_qc_emitted {
                         candidate.portable_echo_qc_emitted = true;
@@ -2344,17 +2413,8 @@ impl StarfishRbcKernel {
                         // creation/dissemination of the QC-bearing block, so
                         // delivery cannot overtake portable publication.
                         candidate.portable_echo_qc_observed = true;
-                        let mut signers = AuthoritySet::default();
-                        for vote in &votes {
-                            signers.insert(vote.sender());
-                        }
-                        let signatures: Vec<_> =
-                            votes.iter().map(|vote| vote.signature()).collect();
-                        let signature_refs: Vec<_> = signatures.iter().collect();
                         effects.push(RbcEffect::PortableEchoQc(StarfishRbcEchoQcV3::new(
-                            block_ref,
-                            signers,
-                            bls_aggregate(&signature_refs),
+                            block_ref, witnesses,
                         )));
                     }
                 }
@@ -2467,8 +2527,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{
-            dummy_bls_signer, dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer,
-            mac_keyrings_for_test,
+            dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
         },
         types::{BlockDigest, BlockReference},
     };
@@ -2539,11 +2598,13 @@ mod tests {
         let echo = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Echo, target);
         assert!(
             receiver
-                .handle_embedded_reference(1, echo)
+                .handle_embedded_reference(1, block(1, 2, 0x81), echo)
                 .unwrap()
                 .is_empty()
         );
-        let effects = receiver.handle_embedded_reference(2, echo).unwrap();
+        let effects = receiver
+            .handle_embedded_reference(2, block(2, 2, 0x82), echo)
+            .unwrap();
         assert!(effects.iter().any(|effect| matches!(
             effect,
             RbcEffect::MulticastPhase {
@@ -2560,11 +2621,13 @@ mod tests {
         let ready = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Ready, target);
         assert!(
             receiver
-                .handle_embedded_reference(1, ready)
+                .handle_embedded_reference(1, block(1, 3, 0x91), ready)
                 .unwrap()
                 .is_empty()
         );
-        let effects = receiver.handle_embedded_reference(2, ready).unwrap();
+        let effects = receiver
+            .handle_embedded_reference(2, block(2, 3, 0x92), ready)
+            .unwrap();
         assert!(effects.iter().any(|effect| matches!(
             effect,
             RbcEffect::Deliver(header) if header.reference() == target
@@ -2572,7 +2635,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_echo_qc_fast_path_requires_and_accepts_exact_signed_quorum() {
+    fn portable_echo_qc_fast_path_uses_exact_authenticated_dag_witnesses() {
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(committee.len());
         let mut receiver = StarfishRbcKernel::new_with_echo_qc_fast_path(
@@ -2591,21 +2654,32 @@ mod tests {
             .unwrap();
         receiver.authorize_echo(target).unwrap();
 
-        let digest = receiver.portable_echo_signature_digest(target).unwrap();
-        let signer = dummy_bls_signer();
-        let votes: Vec<_> = (0..3)
-            .map(|sender| StarfishRbcEchoVoteV3::new(target, sender, signer.sign_digest(&digest)))
+        let echo = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Echo, target);
+        let witnesses: Vec<_> = (0..3)
+            .map(|sender| block(sender, 2, 0x80 + sender as u8))
             .collect();
-        for vote in &votes[..2] {
-            assert!(
-                !receiver
-                    .handle_portable_echo_vote(*vote)
-                    .unwrap()
-                    .iter()
-                    .any(|effect| matches!(effect, RbcEffect::Deliver(_)))
-            );
+        let mut effects = Vec::new();
+        for witness in &witnesses {
+            let header = PinnedRbcHeader {
+                header: Arc::new(RbcCanonicalHeader {
+                    reference: *witness,
+                    block_references: Vec::new(),
+                    acknowledgments: RbcAckFields {
+                        intersection: Some(0),
+                        extra_references: Vec::new(),
+                    },
+                    meta_creation_time_ns: 0,
+                    transactions_commitment: TransactionsCommitment::default(),
+                    starfish_rbc_v3: Some(StarfishRbcFieldsV3::new(vec![echo])),
+                }),
+                committee_id: receiver.context.committee_id,
+            };
+            receiver.note_header_available(header).unwrap();
+            receiver.authorize_echo(*witness).unwrap();
+            effects = receiver
+                .handle_embedded_reference(witness.authority, *witness, echo)
+                .unwrap();
         }
-        let effects = receiver.handle_portable_echo_vote(votes[2]).unwrap();
 
         assert!(!effects.iter().any(|effect| matches!(
             effect,
@@ -2620,7 +2694,8 @@ mod tests {
                 RbcEffect::PortableEchoQc(qc) => Some(qc.clone()),
                 _ => None,
             })
-            .expect("signed quorum must emit a portable ECHO-QC");
+            .expect("exact witness quorum must emit a portable ECHO-QC");
+        assert_eq!(qc.witnesses(), witnesses);
         let qc_position = effects
             .iter()
             .position(|effect| matches!(effect, RbcEffect::PortableEchoQc(_)))
@@ -2635,7 +2710,7 @@ mod tests {
             })
             .expect("delivery follows portable publication");
         assert!(qc_position < delivery_position);
-        assert!(receiver.handle_portable_echo_qc(&qc).unwrap().is_empty());
+        assert!(receiver.handle_portable_echo_qc(1, &qc).unwrap().is_empty());
 
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(committee.len());
@@ -2649,77 +2724,52 @@ mod tests {
             true,
         )
         .unwrap();
-        let missing = late_receiver.handle_portable_echo_qc(&qc).unwrap();
-        assert!(missing.iter().any(|effect| matches!(
+        late_receiver
+            .note_header_available(pinned_header_for_context(late_receiver.context, target))
+            .unwrap();
+        let missing = late_receiver.handle_portable_echo_qc(1, &qc).unwrap();
+        assert_eq!(
+            missing
+                .iter()
+                .filter(|effect| matches!(effect, RbcEffect::NeedHeader { .. }))
+                .count(),
+            witnesses.len()
+        );
+        let mut effects = Vec::new();
+        for witness in &witnesses {
+            let header = PinnedRbcHeader {
+                header: Arc::new(RbcCanonicalHeader {
+                    reference: *witness,
+                    block_references: Vec::new(),
+                    acknowledgments: RbcAckFields {
+                        intersection: Some(0),
+                        extra_references: Vec::new(),
+                    },
+                    meta_creation_time_ns: 0,
+                    transactions_commitment: TransactionsCommitment::default(),
+                    starfish_rbc_v3: Some(StarfishRbcFieldsV3::new(vec![echo])),
+                }),
+                committee_id: late_receiver.context.committee_id,
+            };
+            late_receiver.note_header_available(header).unwrap();
+            effects = late_receiver.authorize_echo(*witness).unwrap();
+        }
+        assert!(effects.iter().any(|effect| matches!(
             effect,
             RbcEffect::PortableEchoQc(relayed) if relayed == &qc
         )));
-        assert!(missing.iter().any(|effect| matches!(
-            effect,
-            RbcEffect::NeedHeader { block_ref, .. } if *block_ref == target
-        )));
-        let effects = late_receiver
-            .note_header_available(pinned_header_for_context(late_receiver.context, target))
-            .unwrap();
         assert!(effects.iter().any(|effect| matches!(
             effect,
             RbcEffect::Deliver(header) if header.reference() == target
         )));
 
         let other_target = block(3, 1, 0x73);
-        let forged = StarfishRbcEchoQcV3::new(other_target, qc.signers(), qc.signature());
-        assert_eq!(
-            receiver.handle_portable_echo_qc(&forged),
-            Err(RbcError::InvalidPortableEchoQc)
-        );
-    }
-
-    #[test]
-    fn invalid_echo_vote_cannot_poison_a_later_portable_quorum() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let keyrings = mac_keyrings_for_test(committee.len());
-        let mut receiver = StarfishRbcKernel::new_with_echo_qc_fast_path(
-            committee,
-            0,
-            instance(TEST_INSTANCE_BYTE),
-            BlockAuthenticationScheme::MacVector,
-            Arc::new(keyrings[0].clone()),
-            1,
-            true,
-        )
-        .unwrap();
-        let target = block(3, 1, 0x74);
-        receiver
-            .note_header_available(pinned_header_for_context(receiver.context, target))
-            .unwrap();
-        let digest = receiver.portable_echo_signature_digest(target).unwrap();
-        let signer = dummy_bls_signer();
-        let wrong_signature = signer.sign_digest(&[0xFF; 32]);
-        for (sender, signature) in [
-            (0, signer.sign_digest(&digest)),
-            (1, wrong_signature),
-            (2, signer.sign_digest(&digest)),
-        ] {
-            let effects = receiver
-                .handle_portable_echo_vote(StarfishRbcEchoVoteV3::new(target, sender, signature))
-                .unwrap();
-            assert!(
-                !effects
-                    .iter()
-                    .any(|effect| matches!(effect, RbcEffect::PortableEchoQc(_)))
-            );
-        }
-        let effects = receiver
-            .handle_portable_echo_vote(StarfishRbcEchoVoteV3::new(
-                target,
-                3,
-                signer.sign_digest(&digest),
-            ))
-            .unwrap();
+        let forged = StarfishRbcEchoQcV3::new(other_target, witnesses);
+        let effects = receiver.handle_portable_echo_qc(1, &forged).unwrap();
         assert!(
-            effects
+            !effects
                 .iter()
-                .any(|effect| matches!(effect, RbcEffect::PortableEchoQc(_)))
+                .any(|effect| matches!(effect, RbcEffect::Deliver(_)))
         );
     }
 
@@ -2911,7 +2961,7 @@ mod tests {
                     );
                     deliveries[owner as usize].push(header.reference());
                 }
-                RbcEffect::PortableEchoVote(_) | RbcEffect::PortableEchoQc(_) => {
+                RbcEffect::PortableEchoQc(_) => {
                     panic!("portable ECHO effects require the single-DAG test harness")
                 }
             }
@@ -3062,19 +3112,14 @@ mod tests {
     }
 
     #[test]
-    fn single_dag_digest_binds_portable_echo_votes_and_certificate() {
+    fn single_dag_digest_binds_portable_echo_witness_certificate() {
         let target = block(0, 4, 0x43);
-        let signature = dummy_bls_signer().sign_digest(&[0x44; 32]);
-        let vote = StarfishRbcEchoVoteV3::new(target, 1, signature);
-        let mut signers = AuthoritySet::default();
-        signers.insert(0);
-        signers.insert(1);
-        signers.insert(2);
-        let signatures = [&signature, &signature, &signature];
-        let qc = StarfishRbcEchoQcV3::new(target, signers, bls_aggregate(&signatures));
+        let qc = StarfishRbcEchoQcV3::new(
+            target,
+            vec![block(0, 5, 0x44), block(1, 5, 0x45), block(2, 5, 0x46)],
+        );
         let empty = StarfishRbcFieldsV3::default();
-        let with_vote = StarfishRbcFieldsV3::with_portable_echo(Vec::new(), vec![vote], Vec::new());
-        let with_qc = StarfishRbcFieldsV3::with_portable_echo(Vec::new(), Vec::new(), vec![qc]);
+        let with_qc = StarfishRbcFieldsV3::with_portable_echo(Vec::new(), vec![qc]);
         let digest = |fields: &StarfishRbcFieldsV3| {
             BlockDigest::new_starfish_rbc_single_dag_header(
                 3,
@@ -3086,9 +3131,7 @@ mod tests {
                 fields,
             )
         };
-        assert_ne!(digest(&empty), digest(&with_vote));
         assert_ne!(digest(&empty), digest(&with_qc));
-        assert_ne!(digest(&with_vote), digest(&with_qc));
     }
 
     #[test]
@@ -3969,6 +4012,66 @@ mod tests {
         assert!(matches!(
             recipient.verify_initial_mac_tag(2, block_ref, &tag),
             Err(RbcError::InitialAuthorMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn complete_initial_mac_vector_is_relayable_and_receiver_verifiable() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let template = valid_canonical_header(0, 7, 0x45);
+        let mut author = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::MacVector,
+        );
+        let local = author
+            .start_local_initial_header(
+                template.reference().round,
+                template.block_references().to_vec(),
+                template.acknowledgment_references(),
+                template.meta_creation_time_ns(),
+                template.transactions_commitment(),
+            )
+            .unwrap();
+        let canonical = local.header().clone();
+        let vector = author.make_local_initial_mac_vector(&local).unwrap();
+        assert_eq!(vector.len(), committee.len());
+
+        let mut receiver = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            2,
+            BlockAuthenticationScheme::MacVector,
+        );
+        assert!(matches!(
+            receiver
+                .accept_direct_initial_header(
+                    1,
+                    canonical.clone(),
+                    &RbcInitialProof::MacVector(vector.clone()),
+                )
+                .unwrap(),
+            RbcInitialHeaderOutcome::Authenticated { .. }
+        ));
+
+        let mut poisoned = vector;
+        poisoned[2] = MacTag::from_bytes([0; crate::crypto::MAC_TAG_SIZE]);
+        let mut other_receiver = kernel(
+            committee,
+            &keyrings,
+            2,
+            BlockAuthenticationScheme::MacVector,
+        );
+        assert!(matches!(
+            other_receiver
+                .accept_direct_initial_header(1, canonical, &RbcInitialProof::MacVector(poisoned),)
+                .unwrap(),
+            RbcInitialHeaderOutcome::StagedUnauthenticated {
+                error: RbcError::InvalidInitialTag,
+                ..
+            }
         ));
     }
 

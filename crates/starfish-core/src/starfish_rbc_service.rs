@@ -25,7 +25,8 @@ use tokio::{
 
 use crate::{
     committee::Committee,
-    crypto::{BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
+    crypto::{MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
+    metrics::sample_starfish_rbc_single_dag_phase,
     network::NetworkMessage,
     starfish_rbc::{
         PinnedRbcHeader, RbcCanonicalHeader, RbcEffect, RbcError, RbcHeaderProposal,
@@ -34,8 +35,8 @@ use crate::{
     },
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockDigest, BlockReference,
-        RoundNumber, StarfishRbcEchoQcV3, StarfishRbcEchoVoteV3, StarfishRbcFieldsV3,
-        StarfishRbcReferenceKindV3, StarfishRbcReferenceV3, TimestampNs, TransactionData,
+        RoundNumber, StarfishRbcEchoQcV3, StarfishRbcFieldsV3, StarfishRbcReferenceKindV3,
+        StarfishRbcReferenceV3, TimestampNs, TransactionData,
     },
 };
 
@@ -48,7 +49,9 @@ pub(crate) enum RbcInitialAuthenticator {
     Ed25519(Signer),
     MlDsa44(MlDsa44Signer),
     MlDsa65(MlDsa65Signer),
-    Mac(Signer, BlsSigner),
+    /// Signature-free initial authentication. The kernel derives the complete
+    /// receiver-verifiable MAC vector from its pairwise keyring.
+    Mac,
 }
 
 impl RbcInitialAuthenticator {
@@ -57,7 +60,7 @@ impl RbcInitialAuthenticator {
             Self::Ed25519(_) => BlockAuthenticationScheme::Ed25519,
             Self::MlDsa44(_) => BlockAuthenticationScheme::MlDsa44,
             Self::MlDsa65(_) => BlockAuthenticationScheme::MlDsa65,
-            Self::Mac(_, _) => BlockAuthenticationScheme::MacVector,
+            Self::Mac => BlockAuthenticationScheme::MacVector,
         }
     }
 }
@@ -159,8 +162,10 @@ pub(crate) enum RbcServiceEvent {
     Delivered(PinnedRbcHeader),
     /// An irrevocable local phase statement waiting to be embedded in the
     /// next ordinary Starfish block.
-    ReferenceReady(StarfishRbcReferenceV3),
-    EchoVoteReady(StarfishRbcEchoVoteV3),
+    ReferenceReady {
+        reference: StarfishRbcReferenceV3,
+        target_creation_time_ns: Option<TimestampNs>,
+    },
     EchoQcReady(StarfishRbcEchoQcV3),
     Rejected {
         peer: Option<AuthorityIndex>,
@@ -189,6 +194,10 @@ enum RbcServiceMessage {
     HeaderResponse {
         peer: AuthorityIndex,
         header: RbcCanonicalHeader,
+    },
+    HeaderEnvelopeResponse {
+        peer: AuthorityIndex,
+        proposal: RbcHeaderProposal,
     },
     PeerConnected(AuthorityIndex),
     PeerDisconnected(AuthorityIndex),
@@ -289,6 +298,14 @@ impl RbcServiceHandle {
         header: RbcCanonicalHeader,
     ) -> Result<(), RbcServiceError> {
         self.send(RbcServiceMessage::HeaderResponse { peer, header })
+    }
+
+    pub(crate) fn header_envelope_response(
+        &self,
+        peer: AuthorityIndex,
+        proposal: RbcHeaderProposal,
+    ) -> Result<(), RbcServiceError> {
+        self.send(RbcServiceMessage::HeaderEnvelopeResponse { peer, proposal })
     }
 
     pub(crate) fn peer_connected(&self, peer: AuthorityIndex) -> Result<(), RbcServiceError> {
@@ -414,7 +431,9 @@ pub(crate) fn start_starfish_rbc_service_with_phase_authority(
         connected_peers: AuthoritySet::default(),
         pending_fetches: AHashMap::new(),
         staged_notifications: AHashSet::new(),
+        header_creation_times: AHashMap::new(),
         retained_initials: BTreeMap::new(),
+        retained_envelopes: AHashMap::new(),
         retained_phases: BTreeSet::new(),
         phase_authority,
     };
@@ -437,14 +456,7 @@ fn validate_local_authenticator(
         RbcInitialAuthenticator::MlDsa65(signer) => committee
             .get_ml_dsa_65_public_key(own_authority)
             .is_some_and(|public_key| public_key == &signer.public_key()),
-        RbcInitialAuthenticator::Mac(signer, echo_signer) => {
-            committee
-                .get_public_key(own_authority)
-                .is_some_and(|public_key| public_key == &signer.public_key())
-                && committee
-                    .get_bls_public_key(own_authority)
-                    .is_some_and(|public_key| public_key == &echo_signer.public_key())
-        }
+        RbcInitialAuthenticator::Mac => committee.known_authority(own_authority),
     };
     if matches {
         Ok(())
@@ -491,9 +503,16 @@ struct RbcServiceState {
     connected_peers: AuthoritySet,
     pending_fetches: AHashMap<BlockReference, PendingHeaderFetch>,
     staged_notifications: AHashSet<BlockReference>,
+    /// Diagnostic timestamp cache populated at the existing header-staging
+    /// boundary. A direct hash lookup avoids re-walking the kernel's nested
+    /// historical slot maps when ECHO or READY becomes locally eligible.
+    header_creation_times: AHashMap<BlockReference, TimestampNs>,
     /// Recipient-specialized local proposals retained for replay after a
     /// connection is replaced. Version one keeps these for the run.
     retained_initials: BTreeMap<(BlockReference, AuthorityIndex), RbcHeaderProposal>,
+    /// Authenticated full-vector proposal retained once per exact header for
+    /// signature-free witness recovery and relay.
+    retained_envelopes: AHashMap<BlockReference, RbcHeaderProposal>,
     /// Authorized local phase intents. Tags are rematerialized for the peer
     /// on replay rather than retaining or cloning a tagged wire message.
     retained_phases: BTreeSet<(BlockReference, RbcPhase)>,
@@ -527,6 +546,9 @@ impl RbcServiceState {
             }
             RbcServiceMessage::HeaderResponse { peer, header } => {
                 self.accept_header_response(peer, header);
+            }
+            RbcServiceMessage::HeaderEnvelopeResponse { peer, proposal } => {
+                self.accept_header_envelope_response(peer, proposal);
             }
             RbcServiceMessage::PeerConnected(peer) => self.peer_connected(peer),
             RbcServiceMessage::PeerDisconnected(peer) => self.peer_disconnected(peer),
@@ -571,6 +593,13 @@ impl RbcServiceState {
         let embedded_references = canonical.starfish_rbc_v3().cloned();
         let transaction_data = transaction_data.map(Arc::new);
         let proposals = self.make_initial_proposals(&local, transaction_data);
+        if let Some((_, proposal)) = proposals
+            .first()
+            .filter(|(_, proposal)| matches!(proposal.proof(), RbcInitialProof::MacVector(_)))
+        {
+            self.retained_envelopes
+                .insert(canonical.reference(), proposal.clone());
+        }
         let (pinned, effects) = local.into_parts();
 
         self.notify_header_staged(pinned);
@@ -580,7 +609,11 @@ impl RbcServiceState {
             self.send_network(recipient, NetworkMessage::RbcInitial(proposal));
         }
         self.process_effects(effects);
-        self.process_embedded_references(self.own_authority, embedded_references);
+        self.process_embedded_references(
+            self.own_authority,
+            canonical.reference(),
+            embedded_references,
+        );
         Ok(canonical)
     }
 
@@ -617,25 +650,52 @@ impl RbcServiceState {
                     RbcInitialProof::MlDsa65(signer.sign_digest(&BlockDigest::from(digest)));
                 self.public_initial_proposals(header, proof, transaction_data)
             }
-            RbcInitialAuthenticator::Mac(_, _) => self
-                .committee
-                .authorities()
-                .filter(|recipient| *recipient != self.own_authority)
-                .map(|recipient| {
-                    let tag = self
+            RbcInitialAuthenticator::Mac => {
+                if matches!(
+                    self.phase_authority,
+                    RbcPhaseAuthorityV1::EmbeddedSingleDag {
+                        echo_qc_fast_path: true
+                    }
+                ) {
+                    let vector = self
                         .kernel
-                        .make_local_initial_mac_tag(local, recipient)
+                        .make_local_initial_mac_vector(local)
                         .expect("local RBC handle must remain selected");
-                    (
-                        recipient,
-                        RbcHeaderProposal::with_transaction_data(
-                            header.clone(),
-                            RbcInitialProof::Mac(tag),
-                            transaction_data.clone(),
-                        ),
-                    )
-                })
-                .collect(),
+                    self.committee
+                        .authorities()
+                        .filter(|recipient| *recipient != self.own_authority)
+                        .map(|recipient| {
+                            (
+                                recipient,
+                                RbcHeaderProposal::with_transaction_data(
+                                    header.clone(),
+                                    RbcInitialProof::MacVector(vector.clone()),
+                                    transaction_data.clone(),
+                                ),
+                            )
+                        })
+                        .collect()
+                } else {
+                    self.committee
+                        .authorities()
+                        .filter(|recipient| *recipient != self.own_authority)
+                        .map(|recipient| {
+                            let tag = self
+                                .kernel
+                                .make_local_initial_mac_tag(local, recipient)
+                                .expect("local RBC handle must remain selected");
+                            (
+                                recipient,
+                                RbcHeaderProposal::with_transaction_data(
+                                    header.clone(),
+                                    RbcInitialProof::Mac(tag),
+                                    transaction_data.clone(),
+                                ),
+                            )
+                        })
+                        .collect()
+                }
+            }
         }
     }
 
@@ -662,6 +722,7 @@ impl RbcServiceState {
     }
 
     fn accept_direct_initial(&mut self, peer: AuthorityIndex, proposal: RbcHeaderProposal) {
+        let retained = proposal.clone();
         let (header, proof, transaction_data) = proposal.into_parts();
         let block_ref = header.reference();
         let embedded_references = header.starfish_rbc_v3().cloned();
@@ -670,14 +731,32 @@ impl RbcServiceState {
             .accept_direct_initial_header(peer, header, &proof)
         {
             Ok(RbcInitialHeaderOutcome::Authenticated { effects }) => {
+                if matches!(retained.proof(), RbcInitialProof::MacVector(_)) {
+                    self.retained_envelopes.insert(block_ref, retained);
+                }
                 let pinned = self.finish_header_staging(block_ref, Some(peer));
                 self.notify_transaction_payload(peer, pinned, transaction_data);
                 self.process_effects(effects);
-                self.process_embedded_references(peer, embedded_references);
+                // A full MAC vector authenticates the canonical header's
+                // author even when `peer` is merely recovering/relaying it.
+                self.process_embedded_references(
+                    block_ref.authority,
+                    block_ref,
+                    embedded_references,
+                );
             }
             Ok(RbcInitialHeaderOutcome::StagedUnauthenticated { effects, error }) => {
-                let pinned = self.finish_header_staging(block_ref, Some(peer));
-                self.notify_transaction_payload(peer, pinned, transaction_data);
+                // Preserve the content-addressed header for a later valid
+                // proof, but do not clear an exact recovery request or expose
+                // its payload as authoritative. Another advertised holder may
+                // still provide the receiver's valid MAC-vector entry.
+                match self.kernel.pinned_header(block_ref) {
+                    Ok(Some(pinned)) => self.notify_header_staged(pinned),
+                    Ok(None) => {
+                        self.reject(Some(peer), RbcError::HeaderUnavailable(block_ref).into())
+                    }
+                    Err(kernel_error) => self.reject(Some(peer), kernel_error.into()),
+                }
                 self.process_effects(effects);
                 self.reject(Some(peer), error.into());
             }
@@ -695,10 +774,16 @@ impl RbcServiceState {
             return;
         }
         match self.kernel.pinned_header(block_ref) {
-            Ok(Some(header)) => self.send_network(
-                peer,
-                NetworkMessage::RbcHeaderResponse(header.header().clone()),
-            ),
+            Ok(Some(header)) => {
+                if let Some(proposal) = self.retained_envelopes.get(&block_ref).cloned() {
+                    self.send_network(peer, NetworkMessage::RbcHeaderEnvelopeResponse(proposal));
+                } else {
+                    self.send_network(
+                        peer,
+                        NetworkMessage::RbcHeaderResponse(header.header().clone()),
+                    );
+                }
+            }
             Ok(None) => {}
             Err(error) => self.reject(Some(peer), error.into()),
         }
@@ -715,6 +800,16 @@ impl RbcServiceState {
             return;
         }
         let Some(fetch) = self.pending_fetches.get(&block_ref) else {
+            if self
+                .kernel
+                .pinned_header(block_ref)
+                .is_ok_and(|header| header.is_some())
+            {
+                // A bounded fetch wave may have two holders in flight. Once
+                // the first exact response completes recovery, the second is
+                // an expected idempotent duplicate.
+                return;
+            }
             self.reject(
                 Some(peer),
                 RbcServiceError::UnexpectedHeaderResponse(block_ref),
@@ -736,6 +831,36 @@ impl RbcServiceState {
             }
             Err(error) => self.reject(Some(peer), error.into()),
         }
+    }
+
+    fn accept_header_envelope_response(
+        &mut self,
+        peer: AuthorityIndex,
+        proposal: RbcHeaderProposal,
+    ) {
+        let block_ref = proposal.header().reference();
+        let Some(fetch) = self.pending_fetches.get(&block_ref) else {
+            if self
+                .kernel
+                .pinned_header(block_ref)
+                .is_ok_and(|header| header.is_some())
+            {
+                return;
+            }
+            self.reject(
+                Some(peer),
+                RbcServiceError::UnexpectedHeaderResponse(block_ref),
+            );
+            return;
+        };
+        if !fetch.holders.contains(peer) {
+            self.reject(
+                Some(peer),
+                RbcServiceError::HeaderResponseFromNonHolder { block_ref, peer },
+            );
+            return;
+        }
+        self.accept_direct_initial(peer, proposal);
     }
 
     fn finish_header_staging(
@@ -776,6 +901,10 @@ impl RbcServiceState {
     }
 
     fn notify_header_staged(&mut self, header: PinnedRbcHeader) {
+        if sample_starfish_rbc_single_dag_phase(header.reference()) {
+            self.header_creation_times
+                .insert(header.reference(), header.header().meta_creation_time_ns());
+        }
         if self.staged_notifications.insert(header.reference()) {
             let _ = self.events.send(RbcServiceEvent::HeaderStaged(header));
         }
@@ -796,9 +925,14 @@ impl RbcServiceState {
                             RbcPhase::Echo => StarfishRbcReferenceKindV3::Echo,
                             RbcPhase::Ready => StarfishRbcReferenceKindV3::Ready,
                         };
-                        let _ = self.events.send(RbcServiceEvent::ReferenceReady(
-                            StarfishRbcReferenceV3::new(kind, block_ref),
-                        ));
+                        let target_creation_time_ns =
+                            sample_starfish_rbc_single_dag_phase(block_ref)
+                                .then(|| self.header_creation_times.get(&block_ref).copied())
+                                .flatten();
+                        let _ = self.events.send(RbcServiceEvent::ReferenceReady {
+                            reference: StarfishRbcReferenceV3::new(kind, block_ref),
+                            target_creation_time_ns,
+                        });
                         continue;
                     }
                     self.retained_phases.insert((block_ref, phase));
@@ -824,25 +958,8 @@ impl RbcServiceState {
                         continue;
                     }
                     self.pending_fetches.remove(&header.reference());
+                    self.header_creation_times.remove(&header.reference());
                     let _ = self.events.send(RbcServiceEvent::Delivered(header));
-                }
-                RbcEffect::PortableEchoVote(target) => {
-                    let RbcInitialAuthenticator::Mac(_, signer) = &self.initial_authenticator
-                    else {
-                        self.reject(None, RbcError::InvalidPortableEchoVote.into());
-                        continue;
-                    };
-                    match self.kernel.portable_echo_signature_digest(target) {
-                        Ok(digest) => {
-                            let vote = StarfishRbcEchoVoteV3::new(
-                                target,
-                                self.own_authority,
-                                signer.sign_digest(&digest),
-                            );
-                            let _ = self.events.send(RbcServiceEvent::EchoVoteReady(vote));
-                        }
-                        Err(error) => self.reject(None, error.into()),
-                    }
                 }
                 RbcEffect::PortableEchoQc(qc) => {
                     let _ = self.events.send(RbcServiceEvent::EchoQcReady(qc));
@@ -854,6 +971,7 @@ impl RbcServiceState {
     fn process_embedded_references(
         &mut self,
         sender: AuthorityIndex,
+        enclosing_block: BlockReference,
         references: Option<StarfishRbcFieldsV3>,
     ) {
         if !matches!(
@@ -870,19 +988,16 @@ impl RbcServiceState {
             return;
         };
         for evidence in references.references() {
-            match self.kernel.handle_embedded_reference(sender, *evidence) {
-                Ok(effects) => self.process_effects(effects),
-                Err(error) => self.reject(Some(sender), error.into()),
-            }
-        }
-        for vote in references.echo_votes() {
-            match self.kernel.handle_portable_echo_vote(*vote) {
+            match self
+                .kernel
+                .handle_embedded_reference(sender, enclosing_block, *evidence)
+            {
                 Ok(effects) => self.process_effects(effects),
                 Err(error) => self.reject(Some(sender), error.into()),
             }
         }
         for qc in references.echo_qcs() {
-            match self.kernel.handle_portable_echo_qc(qc) {
+            match self.kernel.handle_portable_echo_qc(sender, qc) {
                 Ok(effects) => self.process_effects(effects),
                 Err(error) => self.reject(Some(sender), error.into()),
             }
@@ -1022,8 +1137,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{
-            dummy_bls_signer, dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer,
-            mac_keyrings_for_test,
+            dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
         },
         starfish_rbc::RbcPhase,
         types::{TransactionData, VerifiedBlock},
@@ -1058,9 +1172,7 @@ mod tests {
         let keyrings = mac_keyrings_for_test(4);
         let authenticator = match scheme {
             BlockAuthenticationScheme::Ed25519 => RbcInitialAuthenticator::Ed25519(dummy_signer()),
-            BlockAuthenticationScheme::MacVector => {
-                RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer())
-            }
+            BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
             BlockAuthenticationScheme::MlDsa44 => {
                 RbcInitialAuthenticator::MlDsa44(dummy_ml_dsa_44_signer())
             }
@@ -1094,7 +1206,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::MacVector,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedCarrierDag,
@@ -1115,7 +1227,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::MacVector,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedSingleDag {
@@ -1138,7 +1250,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::MacVector,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedSingleDag {
@@ -1272,9 +1384,17 @@ mod tests {
                     message: NetworkMessage::RbcInitial(_),
                     ..
                 } => initials += 1,
-                RbcServiceEvent::ReferenceReady(reference) => {
+                RbcServiceEvent::ReferenceReady {
+                    reference,
+                    target_creation_time_ns,
+                } => {
                     assert_eq!(reference.kind(), StarfishRbcReferenceKindV3::Echo);
                     assert_eq!(reference.reference(), canonical.reference());
+                    assert_eq!(
+                        target_creation_time_ns,
+                        sample_starfish_rbc_single_dag_phase(canonical.reference())
+                            .then_some(canonical.meta_creation_time_ns())
+                    );
                     references += 1;
                 }
                 RbcServiceEvent::Network {
@@ -1292,27 +1412,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portable_fast_path_emits_signed_echo_vote_without_phase_message() {
+    async fn portable_fast_path_emits_signature_free_echo_witness_without_phase_message() {
         let (handle, mut events, task) = start_single_dag_fast_service();
         let mut header = local_header(1, 4);
         header.starfish_rbc_v3 = Some(StarfishRbcFieldsV3::default());
         let canonical = handle.start_local_header(header).await.unwrap();
         let mut initials = 0;
-        let mut vote = None;
+        let mut echo_reference = None;
         for _ in 0..5 {
             match next_event(&mut events).await {
                 RbcServiceEvent::HeaderStaged(header) => {
                     assert_eq!(header.reference(), canonical.reference());
                 }
                 RbcServiceEvent::Network {
-                    message: NetworkMessage::RbcInitial(_),
+                    message: NetworkMessage::RbcInitial(proposal),
                     ..
-                } => initials += 1,
-                RbcServiceEvent::EchoVoteReady(echo_vote) => vote = Some(echo_vote),
-                RbcServiceEvent::ReferenceReady(reference)
+                } => {
+                    let RbcInitialProof::MacVector(tags) = proposal.proof() else {
+                        panic!("portable MAC mode must retain the complete MAC vector")
+                    };
+                    assert_eq!(tags.len(), 4);
+                    initials += 1;
+                }
+                RbcServiceEvent::ReferenceReady { reference, .. }
                     if reference.kind() == StarfishRbcReferenceKindV3::Echo =>
                 {
-                    panic!("portable mode emitted an unsigned ECHO reference")
+                    echo_reference = Some(reference);
                 }
                 RbcServiceEvent::Network {
                     message: NetworkMessage::RbcPhase(_),
@@ -1322,9 +1447,10 @@ mod tests {
             }
         }
         assert_eq!(initials, 3);
-        let vote = vote.expect("portable mode must emit one signed ECHO vote");
-        assert_eq!(vote.target(), canonical.reference());
-        assert_eq!(vote.sender(), 0);
+        assert_eq!(
+            echo_reference.expect("portable mode must emit one embedded ECHO witness"),
+            StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Echo, canonical.reference(),)
+        );
         drop(handle);
         task.await.unwrap();
     }
@@ -1501,7 +1627,7 @@ mod tests {
             };
             assert_eq!(proposal.header(), &canonical);
             let RbcInitialProof::Mac(tag) = proposal.proof() else {
-                panic!("MAC mode must send one tag")
+                panic!("strict MAC mode must send one recipient tag")
             };
             initial_proofs.push(*tag);
         }
@@ -1726,7 +1852,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::Ed25519,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(1),
         );

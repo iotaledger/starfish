@@ -210,8 +210,8 @@ enum Operation {
         /// Requires embedded RBC-DAG authority and changes the finality proof.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_vote_qc_fast_path: bool,
-        /// Testbed-only: deliver a single-DAG RBC header from a portable
-        /// quorum of publicly signed ECHO votes carried in ordinary blocks.
+        /// Testbed-only: deliver a single-DAG RBC header from exact ordinary
+        /// DAG blocks carrying ECHO, authenticated only by MAC vectors.
         #[clap(long, default_value_t = false)]
         starfish_rbc_single_dag_echo_qc_fast_path: bool,
         /// Override only the autonomous RBC-DAG logical C2 fallback timeout.
@@ -615,7 +615,7 @@ async fn local_benchmark(
     }
     if node_parameters.starfish_rbc_single_dag_echo_qc_fast_path {
         println!(
-            "Single-DAG portable ECHO-QC delivery: ENABLED (signed votes; testbed evaluation)"
+            "Single-DAG MAC-witness ECHO-QC: ENABLED (signature-free; testbed-only totality assumption)"
         );
     }
     if let Some(latency) = node_parameters.uniform_latency_ms {

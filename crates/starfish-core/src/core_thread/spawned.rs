@@ -81,8 +81,11 @@ enum CoreThreadCommand {
     ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
     /// Apply locally delivered Starfish-RBC headers on the core thread.
     ApplyStarfishRbcDeliveries(Vec<PinnedRbcHeader>, oneshot::Sender<()>),
-    ApplyStarfishRbcReference(crate::types::StarfishRbcReferenceV3, oneshot::Sender<()>),
-    ApplyStarfishRbcEchoVote(crate::types::StarfishRbcEchoVoteV3, oneshot::Sender<()>),
+    ApplyStarfishRbcReference(
+        crate::types::StarfishRbcReferenceV3,
+        Option<crate::types::TimestampNs>,
+        oneshot::Sender<()>,
+    ),
     ApplyStarfishRbcEchoQc(crate::types::StarfishRbcEchoQcV3, oneshot::Sender<()>),
     /// Commit one deterministic clean carrier-frontier application delta.
     ApplyStarfishRbcDagFrontier(
@@ -278,22 +281,15 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub(crate) async fn apply_starfish_rbc_reference(
         &self,
         reference: crate::types::StarfishRbcReferenceV3,
+        target_creation_time_ns: Option<crate::types::TimestampNs>,
     ) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::ApplyStarfishRbcReference(
-            reference, sender,
+            reference,
+            target_creation_time_ns,
+            sender,
         ))
         .await;
-        receiver.await.expect("core thread is not expected to stop");
-    }
-
-    pub(crate) async fn apply_starfish_rbc_echo_vote(
-        &self,
-        vote: crate::types::StarfishRbcEchoVoteV3,
-    ) {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::ApplyStarfishRbcEchoVote(vote, sender))
-            .await;
         receiver.await.expect("core thread is not expected to stop");
     }
 
@@ -542,20 +538,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     self.syncer.apply_starfish_rbc_deliveries(delivered_headers);
                     sender.send(()).ok();
                 }
-                CoreThreadCommand::ApplyStarfishRbcReference(reference, sender) => {
+                CoreThreadCommand::ApplyStarfishRbcReference(
+                    reference,
+                    target_creation_time_ns,
+                    sender,
+                ) => {
                     metrics
                         .core_thread_tasks_total
                         .with_label_values(&["apply_starfish_rbc_reference"])
                         .inc();
-                    self.syncer.apply_starfish_rbc_reference(reference);
-                    sender.send(()).ok();
-                }
-                CoreThreadCommand::ApplyStarfishRbcEchoVote(vote, sender) => {
-                    metrics
-                        .core_thread_tasks_total
-                        .with_label_values(&["apply_starfish_rbc_echo_vote"])
-                        .inc();
-                    self.syncer.apply_starfish_rbc_echo_vote(vote);
+                    self.syncer
+                        .apply_starfish_rbc_reference(reference, target_creation_time_ns);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ApplyStarfishRbcEchoQc(qc, sender) => {

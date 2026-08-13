@@ -30,7 +30,7 @@ use crate::{
         EXECUTABLE_MODEL_ADMISSION_WINDOW_V1, EXECUTABLE_MODEL_BUFFER_WINDOW_V1,
     },
     stat::{DivUsize, HistogramSender, PreciseHistogram, histogram},
-    types::{AuthorityIndex, format_authority_index},
+    types::{AuthorityIndex, BlockReference, format_authority_index},
 };
 
 /// Metrics collected by the benchmark.
@@ -150,6 +150,42 @@ const RBC_DAG_PIPELINE_LATENCY_STAGES: &[&str] = &[
     RBC_DAG_LATENCY_CREATION_TO_FRONTIER_GENERATED,
     RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
 ];
+const RBC_SINGLE_DAG_PHASE_LATENCY_STAGES: &[&str] = &[
+    "creation_to_echo_queued",
+    "creation_to_echo_embedded",
+    "echo_queue_dwell",
+    "creation_to_ready_queued",
+    "creation_to_ready_embedded",
+    "ready_queue_dwell",
+    "creation_to_delivery",
+];
+
+#[derive(Default)]
+struct SingleDagPhaseTiming {
+    total_ns: [AtomicU64; 7],
+    samples: [AtomicU64; 7],
+    max_ns: [AtomicU64; 7],
+}
+
+fn single_dag_phase_index(stage: &'static str) -> usize {
+    match stage {
+        "creation_to_echo_queued" => 0,
+        "creation_to_echo_embedded" => 1,
+        "echo_queue_dwell" => 2,
+        "creation_to_ready_queued" => 3,
+        "creation_to_ready_embedded" => 4,
+        "ready_queue_dwell" => 5,
+        "creation_to_delivery" => 6,
+        _ => panic!("unknown single-DAG phase timing stage {stage}"),
+    }
+}
+
+/// Deterministic 1/16 diagnostic sampling by the already-random block digest.
+/// The protocol path and every threshold still process all references; only
+/// timing observation is sampled to keep a 40-validator local run measurable.
+pub(crate) fn sample_starfish_rbc_single_dag_phase(reference: BlockReference) -> bool {
+    reference.digest.as_ref()[0] & 0x0f == 0
+}
 pub(crate) const RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD: &str = "physical_forward";
 pub(crate) const RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD: &str = "physical_backward";
 const RBC_DAG_COMMIT_DISTANCE_KINDS: &[&str] = &[
@@ -265,6 +301,12 @@ pub struct Metrics {
     pub network_requests_received_total: IntCounterVec,
     pub network_message_bytes_sent_total: IntCounterVec,
     pub network_message_bytes_received_total: IntCounterVec,
+
+    /// Signature-free single-DAG RBC phase timing. Fixed lock-free slots keep
+    /// this diagnostic off the Prometheus label/map hot path at n=40.
+    starfish_rbc_single_dag_phase_timing: Arc<SingleDagPhaseTiming>,
+    starfish_rbc_single_dag_pending_references: Arc<AtomicU64>,
+    starfish_rbc_single_dag_pending_references_max: Arc<AtomicU64>,
 
     // Starfish-RBC-DAG shadow instrumentation. These metrics are strictly
     // observational: the shadow path never feeds the authoritative DAG or
@@ -694,6 +736,33 @@ fn format_rbc_dag_round_distance(total: u64, samples: u64, maximum: i64) -> Stri
 }
 
 impl Metrics {
+    pub(crate) fn observe_starfish_rbc_single_dag_phase_target_age_ns(
+        &self,
+        stage: &'static str,
+        latency_ns: Option<u64>,
+    ) {
+        let Some(latency_ns) = latency_ns else {
+            return;
+        };
+        if !self.transaction_metrics_active.load(Ordering::Relaxed) {
+            return;
+        }
+        let index = single_dag_phase_index(stage);
+        self.starfish_rbc_single_dag_phase_timing.total_ns[index]
+            .fetch_add(latency_ns, Ordering::Relaxed);
+        self.starfish_rbc_single_dag_phase_timing.samples[index].fetch_add(1, Ordering::Relaxed);
+        self.starfish_rbc_single_dag_phase_timing.max_ns[index]
+            .fetch_max(latency_ns, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_starfish_rbc_single_dag_pending_references(&self, pending: usize) {
+        let pending = u64::try_from(pending).unwrap_or(u64::MAX);
+        self.starfish_rbc_single_dag_pending_references
+            .store(pending, Ordering::Relaxed);
+        self.starfish_rbc_single_dag_pending_references_max
+            .fetch_max(pending, Ordering::Relaxed);
+    }
+
     pub(crate) fn observe_starfish_rbc_dag_pipeline_latency_ns(
         &self,
         stage: &'static str,
@@ -1229,6 +1298,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            starfish_rbc_single_dag_phase_timing: Arc::new(SingleDagPhaseTiming::default()),
+            starfish_rbc_single_dag_pending_references: Arc::new(AtomicU64::new(0)),
+            starfish_rbc_single_dag_pending_references_max: Arc::new(AtomicU64::new(0)),
             starfish_rbc_dag_shadow_inputs_total: register_int_counter_vec_with_registry!(
                 "starfish_rbc_dag_shadow_inputs_total",
                 "Starfish-RBC-DAG shadow inputs, by bounded input kind and processing outcome",
@@ -2107,6 +2179,52 @@ impl Metrics {
             .sum::<Duration>()
             .as_millis() as f64
             / num_validators as f64;
+        let single_dag_phase_latencies = RBC_SINGLE_DAG_PHASE_LATENCY_STAGES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stage)| {
+                let total_ns = metrics
+                    .iter()
+                    .map(|metrics| {
+                        metrics.starfish_rbc_single_dag_phase_timing.total_ns[index]
+                            .load(Ordering::Relaxed)
+                    })
+                    .sum::<u64>();
+                let samples = metrics
+                    .iter()
+                    .map(|metrics| {
+                        metrics.starfish_rbc_single_dag_phase_timing.samples[index]
+                            .load(Ordering::Relaxed)
+                    })
+                    .sum::<u64>();
+                if samples == 0 {
+                    return None;
+                }
+                let maximum_ns = metrics
+                    .iter()
+                    .map(|metrics| {
+                        metrics.starfish_rbc_single_dag_phase_timing.max_ns[index]
+                            .load(Ordering::Relaxed)
+                    })
+                    .max()
+                    .unwrap_or_default();
+                Some((
+                    *stage,
+                    total_ns as f64 / samples as f64 / 1_000_000.0,
+                    maximum_ns as f64 / 1_000_000.0,
+                    samples,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let single_dag_pending_max = metrics
+            .iter()
+            .map(|metrics| {
+                metrics
+                    .starfish_rbc_single_dag_pending_references_max
+                    .load(Ordering::Relaxed)
+            })
+            .max()
+            .unwrap_or_default();
 
         let mut table = PrettyTable::new();
         table.set_format(default_table_format());
@@ -2158,6 +2276,20 @@ impl Metrics {
             table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
         }
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
+        if !single_dag_phase_latencies.is_empty() {
+            table.add_row(row![bH2->""]);
+            table.add_row(row![bH2->"Signature-Free Single-DAG RBC Phase Timing"]);
+            for (stage, average_ms, maximum_ms, samples) in single_dag_phase_latencies {
+                table.add_row(row![
+                    b->format!("{stage}:"),
+                    format!("avg {average_ms:.2} ms, max {maximum_ms:.2} ms (n={samples})")
+                ]);
+            }
+            table.add_row(row![
+                b->"Maximum pending ECHO/READY statements:",
+                single_dag_pending_max
+            ]);
+        }
 
         // Network metrics
         table.add_row(row![bH2->""]);
@@ -3208,6 +3340,14 @@ mod tests {
             .with_label_values(&["direct_commit"])
             .inc();
         metrics.metrics_active.store(true, Ordering::Relaxed);
+        metrics
+            .transaction_metrics_active
+            .store(true, Ordering::Relaxed);
+        metrics.observe_starfish_rbc_single_dag_phase_target_age_ns(
+            "creation_to_ready_queued",
+            Some(11),
+        );
+        metrics.set_starfish_rbc_single_dag_pending_references(2);
         metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
             RBC_DAG_LATENCY_CREATION_TO_ASSIGNMENT,
             12,
