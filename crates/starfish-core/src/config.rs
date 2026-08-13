@@ -72,11 +72,6 @@ pub struct NodeParameters {
     /// observational only and cannot affect the DAG, pacemaker, or commits.
     #[serde(default)]
     pub starfish_rbc_dag_shadow: bool,
-    /// Let the non-authoritative Starfish-RBC-DAG shadow create an autonomous
-    /// optimistic carrier clock. This remains experimental and requires
-    /// `starfish_rbc_dag_shadow`.
-    #[serde(default)]
-    pub starfish_rbc_dag_autonomous_clock: bool,
     /// Testbed-only receiver-local single-DAG RBC path: deliver an exact header
     /// after locally observing quorum ECHO rather than quorum READY. Quorum
     /// intersection preserves a unique value, but pairwise-MAC testimony is
@@ -84,10 +79,6 @@ pub struct NodeParameters {
     /// totality. This must remain an explicit benchmark flag.
     #[serde(default)]
     pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
-    /// Maximum interval between autonomous Starfish-RBC-DAG heartbeat
-    /// carriers. The value is ignored unless the autonomous clock is enabled.
-    #[serde(default = "node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms")]
-    pub starfish_rbc_dag_heartbeat_interval_ms: u64,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -138,10 +129,6 @@ pub mod node_defaults {
         5
     }
 
-    pub fn default_starfish_rbc_dag_heartbeat_interval_ms() -> u64 {
-        250
-    }
-
     pub fn default_causal_push_shard_round_lag() -> RoundNumber {
         0
     }
@@ -168,10 +155,7 @@ impl Default for NodeParameters {
             block_authentication: None,
             starfish_rbc_protocol_instance: None,
             starfish_rbc_dag_shadow: false,
-            starfish_rbc_dag_autonomous_clock: false,
             starfish_rbc_single_dag_echo_qc_fast_path: false,
-            starfish_rbc_dag_heartbeat_interval_ms:
-                node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
@@ -409,36 +393,20 @@ impl NodePrivateConfig {
     pub fn starfish_rbc_dag_shadow_wal(&self) -> PathBuf {
         self.storage_path.join("starfish-rbc-dag-shadow-v1.wal")
     }
-
-    pub fn starfish_rbc_dag_autonomous_clock_wal(&self) -> PathBuf {
-        self.storage_path
-            .join("starfish-rbc-dag-autonomous-clock-v1.wal")
-    }
 }
 
 impl ImportExport for NodePrivateConfig {}
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use super::{NodeParameters, NodePrivateConfig, node_defaults};
+    use super::NodeParameters;
 
     #[test]
     fn starfish_rbc_protocol_instance_is_optional_and_roundtrips() {
         let mut parameters: NodeParameters = serde_yaml::from_str("{}").unwrap();
         assert_eq!(parameters.starfish_rbc_protocol_instance, None);
         assert!(!parameters.starfish_rbc_dag_shadow);
-        assert!(!parameters.starfish_rbc_dag_autonomous_clock);
         assert!(!parameters.starfish_rbc_single_dag_echo_qc_fast_path);
-        assert_eq!(
-            parameters.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
-        );
-        assert_eq!(
-            parameters.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
-        );
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
         assert_ne!(protocol_instance, [0; 32]);
@@ -450,49 +418,7 @@ mod tests {
             Some(protocol_instance)
         );
         assert!(!decoded.starfish_rbc_dag_shadow);
-        assert!(!decoded.starfish_rbc_dag_autonomous_clock);
         assert!(!decoded.starfish_rbc_single_dag_echo_qc_fast_path);
-        assert_eq!(
-            decoded.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
-        );
-        assert_eq!(
-            decoded.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
-        );
-    }
-
-    #[test]
-    fn autonomous_clock_configuration_roundtrips() {
-        let parameters = NodeParameters {
-            starfish_rbc_dag_shadow: true,
-            starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
-            ..NodeParameters::default()
-        };
-
-        let yaml = serde_yaml::to_string(&parameters).unwrap();
-        let decoded: NodeParameters = serde_yaml::from_str(&yaml).unwrap();
-        assert!(decoded.starfish_rbc_dag_shadow);
-        assert!(decoded.starfish_rbc_dag_autonomous_clock);
-        assert_eq!(decoded.starfish_rbc_dag_heartbeat_interval_ms, 125);
-    }
-
-    #[test]
-    fn autonomous_clock_uses_a_distinct_wal() {
-        let private_config =
-            NodePrivateConfig::new_for_benchmarks(Path::new("benchmark"), 1).remove(0);
-
-        assert_ne!(
-            private_config.starfish_rbc_dag_shadow_wal(),
-            private_config.starfish_rbc_dag_autonomous_clock_wal()
-        );
-        assert_eq!(
-            private_config.starfish_rbc_dag_autonomous_clock_wal(),
-            Path::new("benchmark")
-                .join("storage-0")
-                .join("starfish-rbc-dag-autonomous-clock-v1.wal")
-        );
     }
 }
 

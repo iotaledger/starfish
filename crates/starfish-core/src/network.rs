@@ -101,26 +101,6 @@ pub struct RbcDagShadowCarrierResponse {
     pub canonical_carrier: Vec<u8>,
 }
 
-/// Request one exact carrier-clock slot from a peer. Keeping synchronization
-/// slot-addressed prevents an untrusted peer from choosing an unbounded range
-/// of history to return.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RbcDagShadowCarrierSyncRequest {
-    pub author: AuthorityIndex,
-    pub round: RoundNumber,
-}
-
-/// Full response for one exact carrier-clock slot. The receiver validates that
-/// the canonical carrier has the requested author and round, and authenticates
-/// the sidecar before admitting it.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RbcDagShadowCarrierSyncResponse {
-    pub author: AuthorityIndex,
-    pub round: RoundNumber,
-    pub canonical_carrier: Vec<u8>,
-    pub authentication_sidecar: Vec<u8>,
-}
-
 /// A structured batch of block data, ordered by decreasing information density:
 /// full blocks first, then header-only blocks, then standalone shards.
 ///
@@ -236,12 +216,6 @@ pub enum NetworkMessage {
     RbcDagShadowCarrierRequest(BlockReference),
     /// Return content only; the receiver recomputes and checks the reference.
     RbcDagShadowCarrierResponse(RbcDagShadowCarrierResponse),
-    /// Starfish-RBC-DAG milestone-four synchronization for one exact
-    /// `(author, round)` carrier-clock slot.
-    RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest),
-    /// Full canonical carrier and authentication sidecar for an exact
-    /// carrier-clock slot. Receivers validate the duplicated slot identity.
-    RbcDagShadowCarrierSyncResponse(RbcDagShadowCarrierSyncResponse),
 }
 
 impl NetworkMessage {
@@ -272,8 +246,6 @@ impl NetworkMessage {
             Self::RbcDagShadowCarrier(_) => "rbc_dag_shadow_carrier",
             Self::RbcDagShadowCarrierRequest(_) => "rbc_dag_shadow_carrier_request",
             Self::RbcDagShadowCarrierResponse(_) => "rbc_dag_shadow_carrier_response",
-            Self::RbcDagShadowCarrierSyncRequest(_) => "rbc_dag_shadow_carrier_sync_request",
-            Self::RbcDagShadowCarrierSyncResponse(_) => "rbc_dag_shadow_carrier_sync_response",
         }
     }
 }
@@ -1180,18 +1152,6 @@ mod tests {
                 reference: block_ref,
                 canonical_carrier: vec![0xA6, 0xA7],
             });
-        let sync_request =
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest {
-                author: 2,
-                round: 23,
-            });
-        let sync_response =
-            NetworkMessage::RbcDagShadowCarrierSyncResponse(RbcDagShadowCarrierSyncResponse {
-                author: 2,
-                round: 23,
-                canonical_carrier: vec![0xA8, 0xA9],
-                authentication_sidecar: vec![0xAA, 0xAB],
-            });
 
         for (message, expected_index, expected_kind) in [
             (initial, 11, "rbc_initial"),
@@ -1201,8 +1161,6 @@ mod tests {
             (shadow, 15, "rbc_dag_shadow_carrier"),
             (shadow_request, 16, "rbc_dag_shadow_carrier_request"),
             (shadow_response, 17, "rbc_dag_shadow_carrier_response"),
-            (sync_request, 18, "rbc_dag_shadow_carrier_sync_request"),
-            (sync_response, 19, "rbc_dag_shadow_carrier_sync_response"),
         ] {
             assert_eq!(variant_index(&message), expected_index);
             assert_eq!(message.request_type(), expected_kind);
@@ -1211,37 +1169,6 @@ mod tests {
             assert_eq!(decoded.request_type(), expected_kind);
             assert_eq!(variant_index(&decoded), expected_index);
         }
-    }
-
-    #[test]
-    fn rbc_dag_shadow_carrier_sync_payloads_roundtrip_exactly() {
-        let request = RbcDagShadowCarrierSyncRequest {
-            author: 3,
-            round: 41,
-        };
-        let encoded =
-            bincode::serialize(&NetworkMessage::RbcDagShadowCarrierSyncRequest(request)).unwrap();
-        let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
-        assert!(matches!(
-            decoded,
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(decoded) if decoded == request
-        ));
-
-        let response = RbcDagShadowCarrierSyncResponse {
-            author: 3,
-            round: 41,
-            canonical_carrier: vec![0xC1, 0xC2, 0xC3],
-            authentication_sidecar: vec![0xD1, 0xD2],
-        };
-        let encoded = bincode::serialize(&NetworkMessage::RbcDagShadowCarrierSyncResponse(
-            response.clone(),
-        ))
-        .unwrap();
-        let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
-        assert!(matches!(
-            decoded,
-            NetworkMessage::RbcDagShadowCarrierSyncResponse(decoded) if decoded == response
-        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

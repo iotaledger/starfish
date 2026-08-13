@@ -125,31 +125,6 @@ pub struct BenchmarkRunSummary {
     pub shadow_unpaired_shadow: usize,
     #[serde(default)]
     pub shadow_unpaired_max_round_lag: usize,
-    /// Whether this run used the independent, non-authoritative carrier clock
-    /// instead of the direct-RBC mirror comparison.
-    #[serde(default)]
-    pub shadow_autonomous_clock_enabled: bool,
-    /// Sticky run verdict: every validator that was ready at benchmark start
-    /// exposed `clock_valid == 1`, made active-window heartbeat, embedded-RBC
-    /// delivery, WAL, and carrier-round progress, stayed within the
-    /// experimental live-state/skew bounds, and supplied a valid mandatory
-    /// final scrape.
-    #[serde(default)]
-    pub shadow_autonomous_clock_valid: bool,
-    #[serde(default)]
-    pub shadow_autonomous_clock_valid_nodes: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_carrier_round_min: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_carrier_round_max: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_phase_backlog_total: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_admitted_authors_min: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_admitted_stake_min: usize,
-    #[serde(default)]
-    pub shadow_autonomous_clock_buffered_authenticated_total: usize,
 }
 
 impl BenchmarkRunSummary {
@@ -175,15 +150,7 @@ impl BenchmarkRunSummary {
          shadow_delivery_mismatches,shadow_delivery_ambiguous,\
          shadow_wal_durable_records,shadow_pending_recovery,\
          shadow_unpaired_direct,shadow_unpaired_shadow,\
-         shadow_unpaired_max_round_lag,\
-         shadow_autonomous_clock_enabled,shadow_autonomous_clock_valid,\
-         shadow_autonomous_clock_valid_nodes,\
-         shadow_autonomous_clock_carrier_round_min,\
-         shadow_autonomous_clock_carrier_round_max,\
-         shadow_autonomous_clock_phase_backlog_total,\
-         shadow_autonomous_clock_admitted_authors_min,\
-         shadow_autonomous_clock_admitted_stake_min,\
-         shadow_autonomous_clock_buffered_authenticated_total"
+         shadow_unpaired_max_round_lag"
     }
 
     pub fn csv_record(&self) -> String {
@@ -230,17 +197,6 @@ impl BenchmarkRunSummary {
             self.shadow_unpaired_direct.to_string(),
             self.shadow_unpaired_shadow.to_string(),
             self.shadow_unpaired_max_round_lag.to_string(),
-            self.shadow_autonomous_clock_enabled.to_string(),
-            self.shadow_autonomous_clock_valid.to_string(),
-            self.shadow_autonomous_clock_valid_nodes.to_string(),
-            self.shadow_autonomous_clock_carrier_round_min.to_string(),
-            self.shadow_autonomous_clock_carrier_round_max.to_string(),
-            self.shadow_autonomous_clock_phase_backlog_total.to_string(),
-            self.shadow_autonomous_clock_admitted_authors_min
-                .to_string(),
-            self.shadow_autonomous_clock_admitted_stake_min.to_string(),
-            self.shadow_autonomous_clock_buffered_authenticated_total
-                .to_string(),
         ]
         .join(",")
     }
@@ -821,8 +777,8 @@ pub mod test {
     use crate::settings::Settings;
 
     use super::{
-        BenchmarkParametersGeneric, BenchmarkRunSummary, CommitteeScalingPlan,
-        LatencyThroughputSweepPlan, ProtocolParameters, StabilityOutage,
+        BenchmarkParametersGeneric, CommitteeScalingPlan, LatencyThroughputSweepPlan,
+        ProtocolParameters, StabilityOutage,
     };
 
     /// Mock benchmark type for unit tests.
@@ -849,47 +805,6 @@ pub mod test {
     impl ProtocolParameters for TestNodeConfig {}
 
     type TestBenchmarkParameters = BenchmarkParametersGeneric<TestNodeConfig, TestNodeConfig>;
-
-    #[test]
-    fn benchmark_csv_includes_autonomous_clock_verdict_and_state() {
-        let summary = BenchmarkRunSummary {
-            shadow_autonomous_clock_enabled: true,
-            shadow_autonomous_clock_valid: true,
-            shadow_autonomous_clock_valid_nodes: 4,
-            shadow_autonomous_clock_carrier_round_min: 10,
-            shadow_autonomous_clock_carrier_round_max: 12,
-            shadow_autonomous_clock_phase_backlog_total: 3,
-            shadow_autonomous_clock_admitted_authors_min: 3,
-            shadow_autonomous_clock_admitted_stake_min: 7,
-            shadow_autonomous_clock_buffered_authenticated_total: 2,
-            ..BenchmarkRunSummary::default()
-        };
-        let headers = BenchmarkRunSummary::csv_header()
-            .split(',')
-            .map(str::trim)
-            .collect::<Vec<_>>();
-        let record = summary.csv_record();
-        let values = record.split(',').collect::<Vec<_>>();
-        assert_eq!(headers.len(), values.len());
-
-        for (header, expected) in [
-            ("shadow_autonomous_clock_enabled", "true"),
-            ("shadow_autonomous_clock_valid", "true"),
-            ("shadow_autonomous_clock_valid_nodes", "4"),
-            ("shadow_autonomous_clock_carrier_round_min", "10"),
-            ("shadow_autonomous_clock_carrier_round_max", "12"),
-            ("shadow_autonomous_clock_phase_backlog_total", "3"),
-            ("shadow_autonomous_clock_admitted_authors_min", "3"),
-            ("shadow_autonomous_clock_admitted_stake_min", "7"),
-            ("shadow_autonomous_clock_buffered_authenticated_total", "2"),
-        ] {
-            let index = headers
-                .iter()
-                .position(|candidate| *candidate == header)
-                .unwrap();
-            assert_eq!(values[index], expected, "column {header}");
-        }
-    }
 
     #[test]
     fn latency_throughput_sweep_switches_to_fine_grained_steps() {

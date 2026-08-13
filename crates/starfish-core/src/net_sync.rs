@@ -35,7 +35,7 @@ use crate::{
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::{Blake3Hasher, BlsSigner, MacKey},
+    crypto::{BlsSigner, MacKey},
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -52,7 +52,6 @@ use crate::{
     },
     starfish_rbc_dag_shadow_service::{
         ShadowServiceErrorV1, ShadowServiceEventV1, StarfishRbcDagShadowServiceHandleV1,
-        start_starfish_rbc_dag_autonomous_clock_service_v1,
         start_starfish_rbc_dag_shadow_service_v1,
     },
     starfish_rbc_service::{
@@ -71,8 +70,6 @@ const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
 const STARFISH_RBC_HEADER_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const STARFISH_RBC_DAG_AUTONOMOUS_INSTANCE_CONTEXT: &str =
-    "STARFISH_RBC_DAG_AUTONOMOUS_CLOCK_V1_PROTOCOL_INSTANCE";
 
 /// Recover the exact locally selected Starfish-RBC chain so the persisted
 /// non-authoritative shadow can reconcile a WAL that ended before the direct
@@ -142,38 +139,11 @@ fn recovered_local_rbc_headers<H: BlockHandler>(
     Ok(reversed)
 }
 
-fn shadow_transport_error_invalidates_run(error: &ShadowServiceErrorV1) -> bool {
+fn shadow_transport_error_invalidates_comparison(error: &ShadowServiceErrorV1) -> bool {
     matches!(
         error,
         ShadowServiceErrorV1::Overloaded { .. } | ShadowServiceErrorV1::Stopped
     )
-}
-
-fn invalidate_shadow_run(metrics: &Metrics) {
-    // Exactly one verdict is active for a configured shadow mode, but setting
-    // both to zero makes every transport/startup failure fail closed without
-    // duplicating mode knowledge throughout the network plumbing.
-    metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-    metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
-}
-
-fn rbc_dag_shadow_protocol_instance(
-    direct_instance: [u8; 32],
-    autonomous_clock: bool,
-) -> RbcDagProtocolInstanceId {
-    let bytes = if autonomous_clock {
-        // Autonomous heartbeat carriers intentionally do not authenticate in
-        // the same namespace as milestone-three's direct-header mirror. This
-        // makes a heterogeneous deployment fail closed at the shadow boundary
-        // instead of cross-admitting application and control carriers.
-        let mut hasher = Blake3Hasher::new_derive_key(STARFISH_RBC_DAG_AUTONOMOUS_INSTANCE_CONTEXT);
-        hasher.update(&direct_instance);
-        *hasher.finalize().as_bytes()
-    } else {
-        direct_instance
-    };
-    RbcDagProtocolInstanceId::new(bytes)
-        .expect("a configured direct RBC instance and its derived namespace are nonzero")
 }
 
 /// Enforce the MAC experiment's transport contract before cryptographic
@@ -1105,8 +1075,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             NetworkMessage::RbcDagShadowCarrier(envelope) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
                     if let Err(error) = shadow.carrier(self.peer_id, envelope) {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
+                        if shadow_transport_error_invalidates_comparison(&error) {
+                            self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
                         }
                         tracing::warn!("Failed to forward RBC-DAG shadow carrier: {error}");
                     }
@@ -1115,8 +1085,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             NetworkMessage::RbcDagShadowCarrierRequest(reference) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
                     if let Err(error) = shadow.carrier_request(self.peer_id, reference) {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
+                        if shadow_transport_error_invalidates_comparison(&error) {
+                            self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
                         }
                         tracing::warn!("Failed to forward RBC-DAG shadow request: {error}");
                     }
@@ -1125,34 +1095,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             NetworkMessage::RbcDagShadowCarrierResponse(response) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
                     if let Err(error) = shadow.carrier_response(self.peer_id, response) {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
+                        if shadow_transport_error_invalidates_comparison(&error) {
+                            self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
                         }
                         tracing::warn!("Failed to forward RBC-DAG shadow response: {error}");
-                    }
-                }
-            }
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow.carrier_sync_request(self.peer_id, request) {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
-                        }
-                        tracing::warn!(
-                            "Failed to forward RBC-DAG shadow carrier sync request: {error}"
-                        );
-                    }
-                }
-            }
-            NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => {
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow.carrier_sync_response(self.peer_id, response) {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
-                        }
-                        tracing::warn!(
-                            "Failed to forward RBC-DAG shadow carrier sync response: {error}"
-                        );
                     }
                 }
             }
@@ -1807,13 +1753,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let committee = core.committee().clone();
         let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
-        let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow
-            && node_parameters.starfish_rbc_dag_autonomous_clock
-        {
-            // Autonomous carrier rounds are independent of direct consensus
-            // rounds and recover entirely from their distinct WAL.
-            Some(Vec::new())
-        } else if node_parameters.starfish_rbc_dag_shadow {
+        let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow {
             match recovered_local_rbc_headers(&core) {
                 Ok(headers) => Some(headers),
                 Err(error) => {
@@ -1906,10 +1846,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 let protocol_instance_bytes = node_parameters
                     .starfish_rbc_protocol_instance
                     .expect("validated shadow configuration must share the direct RBC instance");
-                let protocol_instance = rbc_dag_shadow_protocol_instance(
-                    protocol_instance_bytes,
-                    node_parameters.starfish_rbc_dag_autonomous_clock,
-                );
+                let protocol_instance = RbcDagProtocolInstanceId::new(protocol_instance_bytes)
+                    .expect("validated direct RBC instance must be nonzero");
                 let committee_context = RbcDagCommitteeContextV1::new(committee.clone())
                     .expect("validated committee must initialize the RBC-DAG shadow");
                 let context = RbcDagContextV1::new_with_committee(
@@ -1932,40 +1870,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 };
                 // -1 means the background WAL replay has not completed yet;
-                // Ready moves the active observational mode to 1 unless work
-                // was already shed (0). The inactive verdict remains zero.
-                if node_parameters.starfish_rbc_dag_autonomous_clock {
-                    metrics.starfish_rbc_dag_shadow_clock_valid.set(-1);
-                    metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-                } else {
-                    metrics.starfish_rbc_dag_shadow_comparison_valid.set(-1);
-                    metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
-                }
-                let started = if node_parameters.starfish_rbc_dag_autonomous_clock {
-                    start_starfish_rbc_dag_autonomous_clock_service_v1(
-                        starfish_rbc_dag_shadow_wal,
-                        committee_context,
-                        dag_state.get_own_authority_index(),
-                        context,
-                        authorizer,
-                        Duration::from_millis(
-                            node_parameters.starfish_rbc_dag_heartbeat_interval_ms,
-                        ),
-                    )
-                } else {
-                    start_starfish_rbc_dag_shadow_service_v1(
-                        starfish_rbc_dag_shadow_wal,
-                        committee_context,
-                        dag_state.get_own_authority_index(),
-                        context,
-                        authorizer,
-                        recovered_local_headers,
-                    )
-                };
-                match started {
+                // Ready moves this to 1 unless work was already shed (0).
+                metrics.starfish_rbc_dag_shadow_comparison_valid.set(-1);
+                match start_starfish_rbc_dag_shadow_service_v1(
+                    starfish_rbc_dag_shadow_wal,
+                    committee_context,
+                    dag_state.get_own_authority_index(),
+                    context,
+                    authorizer,
+                    recovered_local_headers,
+                ) {
                     Ok((service, events, task)) => (Some(service), Some(events), Some(task)),
                     Err(error) => {
-                        invalidate_shadow_run(&metrics);
+                        metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
                         tracing::error!(
                             "Disabling non-authoritative Starfish-RBC-DAG shadow: {error}"
                         );
@@ -2168,8 +2085,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     canonical.transactions_commitment(),
                                 );
                                 if let Err(error) = shadow.direct_delivered(identity) {
-                                    if shadow_transport_error_invalidates_run(&error) {
-                                        invalidate_shadow_run(&rbc_metrics);
+                                    if shadow_transport_error_invalidates_comparison(&error) {
+                                        rbc_metrics
+                                            .starfish_rbc_dag_shadow_comparison_valid
+                                            .set(0);
                                     }
                                     tracing::warn!(
                                         "Failed to notify RBC-DAG shadow of direct delivery: {error}"
@@ -2224,7 +2143,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         shadow_metrics
                                             .starfish_rbc_dag_shadow_comparison_valid
                                             .set(0);
-                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                                     }
                                     Err(mpsc::error::TrySendError::Closed(_)) => {
                                         shadow_metrics
@@ -2234,7 +2152,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         shadow_metrics
                                             .starfish_rbc_dag_shadow_comparison_valid
                                             .set(0);
-                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                                     }
                                 }
                             } else {
@@ -2306,38 +2223,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .starfish_rbc_dag_shadow_wal_durable_records_total
                                 .inc_by(records);
                         }
-                        ShadowServiceEventV1::Ready { autonomous_clock } => {
-                            let verdict = if autonomous_clock {
-                                &shadow_metrics.starfish_rbc_dag_shadow_clock_valid
-                            } else {
-                                &shadow_metrics.starfish_rbc_dag_shadow_comparison_valid
-                            };
-                            if verdict.get() != 0 {
-                                verdict.set(1);
+                        ShadowServiceEventV1::Ready => {
+                            if shadow_metrics
+                                .starfish_rbc_dag_shadow_comparison_valid
+                                .get()
+                                != 0
+                            {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_comparison_valid
+                                    .set(1);
                             }
-                        }
-                        ShadowServiceEventV1::ClockState {
-                            open_round,
-                            phase_backlog,
-                            admitted_authors,
-                            admitted_stake,
-                            buffered_authenticated,
-                        } => {
-                            shadow_metrics
-                                .starfish_rbc_dag_shadow_carrier_round
-                                .set(i64::from(open_round));
-                            shadow_metrics
-                                .starfish_rbc_dag_shadow_phase_backlog
-                                .set(i64::try_from(phase_backlog).unwrap_or(i64::MAX));
-                            shadow_metrics
-                                .starfish_rbc_dag_shadow_admitted_authors
-                                .set(i64::try_from(admitted_authors).unwrap_or(i64::MAX));
-                            shadow_metrics
-                                .starfish_rbc_dag_shadow_admitted_stake
-                                .set(i64::try_from(admitted_stake).unwrap_or(i64::MAX));
-                            shadow_metrics
-                                .starfish_rbc_dag_shadow_buffered_authenticated
-                                .set(i64::try_from(buffered_authenticated).unwrap_or(i64::MAX));
                         }
                         ShadowServiceEventV1::Recovered {
                             batches,
@@ -2360,7 +2255,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 shadow_metrics
                                     .starfish_rbc_dag_shadow_comparison_valid
                                     .set(0);
-                                shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                             }
                             tracing::warn!(
                                 "Rejected non-authoritative RBC-DAG shadow input from {:?}: {}",
@@ -2925,8 +2819,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
         if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
             if let Err(error) = shadow.peer_connected(peer_id) {
-                if shadow_transport_error_invalidates_run(&error) {
-                    invalidate_shadow_run(&shadow_metrics);
+                if shadow_transport_error_invalidates_comparison(&error) {
+                    shadow_metrics
+                        .starfish_rbc_dag_shadow_comparison_valid
+                        .set(0);
                 }
                 tracing::warn!(
                     "Failed to notify RBC-DAG shadow that authority {} connected: {}",
@@ -2984,8 +2880,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
         if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
             if let Err(error) = shadow.peer_disconnected(peer_id) {
-                if shadow_transport_error_invalidates_run(&error) {
-                    invalidate_shadow_run(&shadow_metrics);
+                if shadow_transport_error_invalidates_comparison(&error) {
+                    shadow_metrics
+                        .starfish_rbc_dag_shadow_comparison_valid
+                        .set(0);
                 }
                 tracing::warn!(
                     "Failed to notify RBC-DAG shadow that authority {} disconnected: {}",
@@ -3707,20 +3605,5 @@ mod tests {
         assert_eq!(selected.len(), 5);
         assert_eq!(unique.len(), selected.len());
         assert!(selected.iter().all(|peer| candidates.contains(peer)));
-    }
-
-    #[test]
-    fn autonomous_carriers_use_a_distinct_authentication_namespace() {
-        let direct = [0x5A; 32];
-        let mirror = rbc_dag_shadow_protocol_instance(direct, false);
-        let autonomous = rbc_dag_shadow_protocol_instance(direct, true);
-
-        assert_eq!(mirror.as_bytes(), &direct);
-        assert_ne!(autonomous, mirror);
-        assert_eq!(
-            autonomous,
-            rbc_dag_shadow_protocol_instance(direct, true),
-            "derived autonomous namespace must be deterministic across nodes"
-        );
     }
 }

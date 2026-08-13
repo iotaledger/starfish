@@ -34,7 +34,7 @@ use crate::{
     },
     types::{
         AuthorityIndex, BlockAuthenticationScheme, BlockDigest, BlockReference, MAX_COMMITTEE_SIZE,
-        RoundNumber, Stake, TimestampNs,
+        RoundNumber, TimestampNs,
     },
 };
 
@@ -551,49 +551,6 @@ impl StarfishRbcDagShadowV1 {
         self.model.can_create_carrier()
     }
 
-    pub(crate) fn pending_phase_backlog_len(&self) -> usize {
-        self.model.pending_phase_backlog_len()
-    }
-
-    pub(crate) fn admitted_reference(
-        &self,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-    ) -> Option<BlockReference> {
-        self.model.admitted_reference(authority, round)
-    }
-
-    pub(crate) fn current_round_admitted_author_count(&self) -> usize {
-        let round = self.local_carrier_round();
-        self.committee
-            .committee()
-            .authorities()
-            .filter(|authority| self.model.admitted_reference(*authority, round).is_some())
-            .count()
-    }
-
-    pub(crate) fn current_round_admitted_stake(&self) -> Stake {
-        let round = self.local_carrier_round();
-        self.committee
-            .committee()
-            .authorities()
-            .filter(|authority| self.model.admitted_reference(*authority, round).is_some())
-            .filter_map(|authority| self.committee.committee().get_stake(authority))
-            .fold(0, Stake::saturating_add)
-    }
-
-    /// Authenticated slots retained beyond the model's current admission
-    /// window. These are bounded by the reducer's future-carrier window and
-    /// become admitted only through sequential clock advancement.
-    pub(crate) fn buffered_authenticated_carrier_count(&self) -> usize {
-        self.authenticated_slots
-            .iter()
-            .filter(|((authority, round), reference)| {
-                self.model.admitted_reference(*authority, *round) != Some(**reference)
-            })
-            .count()
-    }
-
     pub(crate) fn wal_counts(&self) -> (u64, u64) {
         (self.wal.batch_count(), self.wal.record_count())
     }
@@ -649,17 +606,6 @@ impl StarfishRbcDagShadowV1 {
                 .is_some_and(|outbound| outbound.exposed())
         );
         Ok((envelope, effects))
-    }
-
-    /// Create the currently open autonomous control slot with no application
-    /// payload. The caller supplies only a timestamp: the round is derived
-    /// from the durable reducer and the empty commitment is canonical.
-    pub(crate) fn create_local_control_heartbeat(
-        &mut self,
-        creation_time_ns: TimestampNs,
-    ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
-        let round = self.model.local_carrier_round();
-        self.create_local_carrier(round, TransactionsCommitment::default(), creation_time_ns)
     }
 
     /// Verify and durably apply an authenticated network envelope for this
@@ -838,37 +784,6 @@ impl StarfishRbcDagShadowV1 {
             .map(<[u8]>::to_vec)
     }
 
-    /// Decode canonical carrier bytes without mutating the reducer. Sync
-    /// clients use this to bind a response to the requested author and round
-    /// before passing it through normal authenticated ingress.
-    pub(crate) fn candidate_slot(
-        &self,
-        canonical_carrier_wire: &[u8],
-    ) -> Result<(AuthorityIndex, RoundNumber, BlockReference), ShadowErrorV1> {
-        let candidate = decode_candidate(canonical_carrier_wire, &self.committee, None)?;
-        Ok((
-            candidate.header().author(),
-            candidate.header().carrier_round(),
-            candidate.reference(),
-        ))
-    }
-
-    /// Return the exact durably exposed local envelope for one carrier round.
-    /// Missing, incomplete, or unexposed slots are never served.
-    pub(crate) fn local_outbound_envelope(
-        &self,
-        round: RoundNumber,
-    ) -> Option<ShadowOutboundEnvelopeV1> {
-        let snapshot = self.journal.snapshot();
-        let reference = snapshot.own_carrier(round)?;
-        let outbound = snapshot.outbound(reference)?;
-        outbound.exposed().then(|| ShadowOutboundEnvelopeV1 {
-            reference: outbound.reference(),
-            canonical_carrier_wire: outbound.canonical_carrier_wire().to_vec(),
-            authentication_sidecar: outbound.authentication_sidecar().to_vec(),
-        })
-    }
-
     /// Return every exposed local carrier in deterministic reference order.
     /// The same full sidecar is returned for every peer.
     pub(crate) fn retransmissions(&self) -> Vec<ShadowOutboundEnvelopeV1> {
@@ -890,7 +805,7 @@ impl StarfishRbcDagShadowV1 {
     /// payload and creation timestamp before accepting new observations.
     pub(crate) fn local_outbound_metadata(
         &self,
-    ) -> Result<Vec<(RoundNumber, TransactionsCommitment, TimestampNs, bool)>, ShadowErrorV1> {
+    ) -> Result<Vec<(RoundNumber, TransactionsCommitment, TimestampNs)>, ShadowErrorV1> {
         self.journal
             .snapshot()
             .retransmissions()
@@ -905,8 +820,6 @@ impl StarfishRbcDagShadowV1 {
                     candidate.header().carrier_round(),
                     candidate.header().transactions_commitment(),
                     candidate.header().creation_time_ns(),
-                    candidate.header().data_acknowledgments().is_empty()
-                        && candidate.header().consensus_vertex().is_none(),
                 ))
             })
             .collect()
@@ -2138,139 +2051,6 @@ mod tests {
             infer_ingress_provenance(2, 1),
             IngressProvenanceV1::Relayed { peer: 2 }
         );
-    }
-
-    #[test]
-    fn autonomous_control_heartbeat_derives_the_open_round_and_is_durably_addressable() {
-        let mut network = TestNetwork::new();
-        let node = &mut network.nodes[0];
-        assert_eq!(node.local_carrier_round(), 1);
-        assert_eq!(node.current_round_admitted_author_count(), 0);
-        assert_eq!(node.current_round_admitted_stake(), 0);
-        assert_eq!(node.pending_phase_backlog_len(), 0);
-        assert_eq!(node.buffered_authenticated_carrier_count(), 0);
-        assert_eq!(node.local_outbound_envelope(1), None);
-
-        let before = node.wal_counts();
-        let (heartbeat, effects) = node.create_local_control_heartbeat(123).unwrap();
-        assert!(effects.is_empty());
-        assert_eq!(node.wal_counts().0, before.0 + 1);
-        let candidate = decode_candidate(
-            heartbeat.canonical_carrier_wire(),
-            &network.committee,
-            Some(heartbeat.reference()),
-        )
-        .unwrap();
-        assert_eq!(candidate.header().author(), 0);
-        assert_eq!(candidate.header().carrier_round(), 1);
-        assert_eq!(
-            candidate.header().transactions_commitment(),
-            TransactionsCommitment::default()
-        );
-        assert_eq!(candidate.header().creation_time_ns(), 123);
-        assert!(candidate.header().data_acknowledgments().is_empty());
-        assert!(candidate.header().phase_batch().is_empty());
-        assert!(candidate.header().consensus_vertex().is_none());
-        assert_eq!(node.local_outbound_envelope(1), Some(heartbeat.clone()));
-        assert_eq!(node.local_outbound_envelope(2), None);
-        assert_eq!(
-            node.candidate_slot(heartbeat.canonical_carrier_wire())
-                .unwrap(),
-            (0, 1, heartbeat.reference())
-        );
-        assert_eq!(node.admitted_reference(0, 1), Some(heartbeat.reference()));
-        assert_eq!(node.current_round_admitted_author_count(), 1);
-        assert_eq!(node.current_round_admitted_stake(), 1);
-        assert_eq!(node.pending_phase_backlog_len(), 1);
-        assert_eq!(node.buffered_authenticated_carrier_count(), 0);
-
-        let durable_counts = node.wal_counts();
-        assert!(matches!(
-            node.create_local_control_heartbeat(124),
-            Err(ShadowErrorV1::Model(ModelError::LocalCarrierAlreadyFixed(
-                1
-            )))
-        ));
-        assert_eq!(node.wal_counts(), durable_counts);
-
-        let mut trailing = heartbeat.canonical_carrier_wire().to_vec();
-        trailing.push(0);
-        assert!(node.candidate_slot(&trailing).is_err());
-    }
-
-    #[test]
-    fn autonomous_control_heartbeat_advances_sequentially_and_reopens_exact_bytes() {
-        let mut network = TestNetwork::new();
-        let first = network.nodes[0]
-            .create_local_control_heartbeat(1_000)
-            .unwrap()
-            .0;
-        for author in [1, 2] {
-            let candidate = round_one_candidate(author, &network.committee, 0x70 + author as u8);
-            let authentication = network
-                .context
-                .authenticate_with_committee(
-                    &candidate,
-                    &network.committee,
-                    CarrierAuthorizerV1::MacVector {
-                        authority: author,
-                        keys: &network.keyrings[author as usize],
-                    },
-                )
-                .unwrap();
-            network.nodes[0]
-                .receive_authenticated_from_peer(
-                    &candidate.canonical_wire_bytes().unwrap(),
-                    &authentication.canonical_wire_bytes(),
-                    author,
-                )
-                .unwrap();
-        }
-        assert_eq!(network.nodes[0].local_carrier_round(), 2);
-        assert!(network.nodes[0].can_create_carrier());
-        assert_eq!(network.nodes[0].current_round_admitted_author_count(), 0);
-
-        let second = network.nodes[0]
-            .create_local_control_heartbeat(2_000)
-            .unwrap()
-            .0;
-        let second_candidate = decode_candidate(
-            second.canonical_carrier_wire(),
-            &network.committee,
-            Some(second.reference()),
-        )
-        .unwrap();
-        assert_eq!(second_candidate.header().carrier_round(), 2);
-        assert_eq!(second_candidate.header().own_prev(), first.reference());
-        assert_eq!(
-            second_candidate.header().transactions_commitment(),
-            TransactionsCommitment::default()
-        );
-        assert_eq!(
-            network.nodes[0].local_outbound_envelope(1),
-            Some(first.clone())
-        );
-        assert_eq!(
-            network.nodes[0].local_outbound_envelope(2),
-            Some(second.clone())
-        );
-
-        let node = network.nodes.swap_remove(0);
-        let path = network.path(0);
-        node.shutdown().unwrap();
-        let (restarted, report) = StarfishRbcDagShadowV1::open(
-            path,
-            network.committee.clone(),
-            0,
-            network.context,
-            ShadowAuthorizerV1::MacVector(network.keyrings[0].clone()),
-        )
-        .unwrap();
-        assert!(report.replayed_batches() >= 4);
-        assert_eq!(restarted.local_carrier_round(), 2);
-        assert!(!restarted.can_create_carrier());
-        assert_eq!(restarted.local_outbound_envelope(1), Some(first));
-        assert_eq!(restarted.local_outbound_envelope(2), Some(second));
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::{
     error::{SshError, TestbedError, TestbedResult},
     faults::{CrashRecoverySchedule, FaultsType},
     logs::LogsAnalyzer,
-    measurements::{Measurement, MeasurementsCollection, shadow_validity_metric},
+    measurements::{Measurement, MeasurementsCollection},
     monitor::Monitor,
     protocol::{ProtocolCommands, ProtocolMetrics},
     settings::Settings,
@@ -1098,8 +1098,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .filter(|node| !killed_node_ids.contains(&node.id))
             .filter_map(|node| node_indices.get(&node.id).copied())
             .collect();
-        let shadow_final_validity_metric = shadow_validity_metric(parameters);
-        let shadow_final_scrape_required = shadow_final_validity_metric.is_some();
+        let shadow_final_scrape_required = parameters.consensus_protocol == "starfish-rbc"
+            && parameters.node_parameters.starfish_rbc_dag_shadow;
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
@@ -1224,9 +1224,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         continue;
                     };
                     let parsed = Measurement::from_prometheus::<P>(stdout);
-                    if shadow_final_validity_metric
-                        .is_some_and(|metric| parsed.contains_key(metric))
-                    {
+                    if parsed.contains_key("starfish_rbc_dag_shadow_comparison_valid") {
                         fresh_final_shadow_scrapers.insert(i);
                     }
                     for (label, measurement) in parsed {
@@ -1432,8 +1430,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .filter(|node| !killed_node_ids.contains(&node.id))
             .filter_map(|node| node_indices.get(&node.id).copied())
             .collect();
-        let shadow_final_validity_metric = shadow_validity_metric(parameters);
-        let shadow_final_scrape_required = shadow_final_validity_metric.is_some();
+        let shadow_final_scrape_required = parameters.consensus_protocol == "starfish-rbc"
+            && parameters.node_parameters.starfish_rbc_dag_shadow;
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
@@ -1847,7 +1845,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     continue;
                 };
                 let parsed = Measurement::from_prometheus::<P>(stdout);
-                if shadow_final_validity_metric.is_some_and(|metric| parsed.contains_key(metric)) {
+                if parsed.contains_key("starfish_rbc_dag_shadow_comparison_valid") {
                     fresh_final_shadow_scrapers.insert(i);
                 }
                 for (label, measurement) in parsed {

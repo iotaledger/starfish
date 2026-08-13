@@ -50,41 +50,25 @@ Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctnes
 prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
 **Starfish-RBC-DAG** is a follow-up that pipelines all-carrier RBC through an optimistic carrier DAG
 while keeping certified Starfish consensus and ordering in a separate logical projection. Its
-canonical types, deterministic models, crash journal, direct-header comparison shadow, and a
-separate opt-in autonomous heartbeat carrier clock are implemented. Run the comparison shadow with
-`--consensus starfish-rbc --starfish-rbc-dag-shadow`. Add
-`--starfish-rbc-dag-autonomous-clock` to run an independent control-only carrier clock (prototype
-heartbeat default: 250 ms); that mode deliberately does not map direct application headers to
-carrier rounds or claim a direct-delivery comparison. Direct Starfish-RBC remains solely
-authoritative in both modes, and shadow failures or results cannot affect proposals, commits, or
-output as protocol state. Shadow traffic still shares the validator's network socket and bandwidth,
-so it can perturb timing, and it must be enabled only on a homogeneous new-binary committee; there
-is no rolling-upgrade capability negotiation. The provisional `starfish-rbc-dag` selector is not
-implemented yet. The shadow uses per-transition fsync and a clone-based reference reducer, so it is
-a correctness instrument, not a fair performance baseline, and carries no safety or liveness claim.
-Its WAL can reopen the shadow actor, but this is not full validator crash recovery: authoritative
-direct Starfish-RBC phase and delivery locks are not durable yet, so that baseline remains fail-stop
-across process restart. The design and proof obligations are documented in the
+canonical types, deterministic models, crash journal, and an opt-in persisted network shadow are
+implemented. Run the shadow with `--consensus starfish-rbc --starfish-rbc-dag-shadow`; direct
+Starfish-RBC remains solely authoritative and shadow failures or results cannot affect proposals,
+commits, or output as protocol state. Shadow traffic still shares the validator's network socket and
+bandwidth, so it can perturb timing, and it must be enabled only on a homogeneous new-binary
+committee; there is no rolling-upgrade capability negotiation. The provisional `starfish-rbc-dag`
+selector is not implemented yet. The shadow uses per-transition fsync and a clone-based reference
+reducer, so it is a correctness instrument, not a fair performance baseline, and carries no safety
+or liveness claim. Its WAL can reopen the shadow actor against matching recovered direct headers,
+but this is not full validator crash recovery: authoritative direct Starfish-RBC phase and delivery
+locks are not durable yet, so that baseline remains fail-stop across process restart. The design and
+proof obligations are documented in the
 [protocol design](docs/starfish-rbc-dag-protocol.md).
-For a direct-header shadow comparison,
+For any shadow comparison,
 `starfish_rbc_dag_shadow_comparison_valid` must stay at `1`; a value of `0` means the bounded
 observational path was disabled or shed work and the comparison must be discarded. Healthy live
 production retains a short embedded-RBC pipeline tail, so benchmark validation uses bounded
 unpaired-count and oldest-round-lag gauges rather than requiring instantaneous equality between
-the cumulative direct and shadow delivery counters. Autonomous runs instead require
-`starfish_rbc_dag_shadow_clock_valid == 1`, durable heartbeat progress, advancing carrier rounds,
-in-window embedded-RBC delivery, and bounded clock-state gauges. The current queue budget supports
-at most 60 validators in mirror mode and 20 in autonomous mode.
-
-An exploratory 10-validator, 60-second local run with the AWS RTT emulator, nominal 1,000 tx/s
-load, MAC authentication, and a 250 ms autonomous heartbeat completed with a `VALID` clock
-verdict on 2026-08-11. All validators reached carrier round 196 with zero skew and zero pending
-recovery; the run recorded 1,959 heartbeats and 19,280 embedded-RBC deliveries. The authoritative
-direct Starfish-RBC path reported 776.50 tx/s, 3,378.4 ms p50 block latency, 3,953.8 ms p50
-end-to-end latency, and 0.45 MB/s average outbound bandwidth. This is a prototype continuity
-result, not a fair performance comparison: the 60-second cutoff includes the local generator
-warmup, and the control-only shadow still performs per-transition fsync/reference-model work while
-sharing the authoritative socket.
+the cumulative direct and shadow delivery counters.
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's

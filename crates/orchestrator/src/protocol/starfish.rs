@@ -19,10 +19,7 @@ use super::{
     BINARY_PATH, METRICS_CURL_CONNECT_TIMEOUT_SECS, METRICS_CURL_MAX_TIME_SECS, ProtocolCommands,
     ProtocolMetrics, ProtocolParameters,
 };
-use crate::{
-    benchmark::BenchmarkParameters, client::Instance, measurements::shadow_validity_metric,
-    settings::Settings,
-};
+use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
@@ -278,8 +275,6 @@ impl ProtocolMetrics for StarfishProtocol {
                 .collect();
         }
 
-        let validity_metric = shadow_validity_metric(parameters)
-            .expect("Starfish-RBC shadow readiness has an active validity metric");
         self.nodes_metrics_path(instances, parameters)
             .into_iter()
             .map(|(instance, path)| {
@@ -289,7 +284,7 @@ impl ProtocolMetrics for StarfishProtocol {
                         "curl --silent --show-error --fail --compressed --connect-timeout \
                          {METRICS_CURL_CONNECT_TIMEOUT_SECS} --max-time \
                          {METRICS_CURL_MAX_TIME_SECS} {path} | grep -Eq \
-                         '^{validity_metric}(\\{{[^}}]*\\}})? \
+                         '^starfish_rbc_dag_shadow_comparison_valid(\\{{[^}}]*\\}})? \
                          1(\\.0)?$'"
                     ),
                 )
@@ -323,9 +318,6 @@ impl StarfishProtocol {
             // not let it make Sailfish++ or another comparison member fail
             // validator configuration.
             node_parameters.starfish_rbc_dag_shadow = false;
-            node_parameters.starfish_rbc_dag_autonomous_clock = false;
-            node_parameters.starfish_rbc_dag_heartbeat_interval_ms =
-                config::node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms();
         }
         node_parameters
     }
@@ -362,14 +354,12 @@ impl StarfishProtocol {
 mod tests {
     use super::{ProtocolMetrics, StarfishNodeParameters, StarfishProtocol};
     use crate::{benchmark::BenchmarkParameters, client::Instance};
-    use starfish_core::config::{NodeParameters, node_defaults};
+    use starfish_core::config::NodeParameters;
 
     #[test]
     fn starfish_rbc_genesis_gets_one_nonzero_protocol_instance() {
         let shared_parameters = StarfishNodeParameters(NodeParameters {
             starfish_rbc_dag_shadow: true,
-            starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
             ..NodeParameters::default()
         });
         let parameters =
@@ -380,16 +370,12 @@ mod tests {
                 .is_some_and(|instance| instance != [0; 32])
         );
         assert!(parameters.starfish_rbc_dag_shadow);
-        assert!(parameters.starfish_rbc_dag_autonomous_clock);
-        assert_eq!(parameters.starfish_rbc_dag_heartbeat_interval_ms, 125);
     }
 
     #[test]
     fn non_rbc_genesis_does_not_need_a_protocol_instance() {
         let shared_parameters = StarfishNodeParameters(NodeParameters {
             starfish_rbc_dag_shadow: true,
-            starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
             ..NodeParameters::default()
         });
         let parameters =
@@ -398,15 +384,6 @@ mod tests {
         assert!(
             !parameters.starfish_rbc_dag_shadow,
             "a global shadow flag must not leak into non-RBC comparison members"
-        );
-        assert!(
-            !parameters.starfish_rbc_dag_autonomous_clock,
-            "a global autonomous-clock flag must not leak into non-RBC comparison members"
-        );
-        assert_eq!(
-            parameters.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms(),
-            "a global heartbeat override must not leak into non-RBC comparison members"
         );
     }
 
@@ -425,26 +402,6 @@ mod tests {
             .1;
 
         assert!(command.contains("starfish_rbc_dag_shadow_comparison_valid"));
-        assert!(command.contains("grep -Eq"));
-    }
-
-    #[test]
-    fn autonomous_shadow_readiness_waits_for_clock_verdict() {
-        let protocol = StarfishProtocol {
-            working_dir: std::path::PathBuf::from("benchmark"),
-        };
-        let mut parameters = BenchmarkParameters::new_for_tests();
-        parameters.consensus_protocol = "starfish-rbc".to_owned();
-        parameters.node_parameters.starfish_rbc_dag_shadow = true;
-        parameters.node_parameters.starfish_rbc_dag_autonomous_clock = true;
-        let command = protocol
-            .nodes_readiness_command(vec![Instance::new_for_test("1".into())], &parameters)
-            .pop()
-            .unwrap()
-            .1;
-
-        assert!(command.contains("starfish_rbc_dag_shadow_clock_valid"));
-        assert!(!command.contains("starfish_rbc_dag_shadow_comparison_valid"));
         assert!(command.contains("grep -Eq"));
     }
 
