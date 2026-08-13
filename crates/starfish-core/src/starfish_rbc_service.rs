@@ -25,7 +25,7 @@ use tokio::{
 
 use crate::{
     committee::Committee,
-    crypto::{BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
+    crypto::{MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
     network::NetworkMessage,
     starfish_rbc::{
         PinnedRbcHeader, RbcCanonicalHeader, RbcEffect, RbcError, RbcHeaderProposal,
@@ -34,8 +34,8 @@ use crate::{
     },
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockDigest, BlockReference,
-        RoundNumber, StarfishRbcEchoQcV3, StarfishRbcEchoVoteV3, StarfishRbcFieldsV3,
-        StarfishRbcReferenceKindV3, StarfishRbcReferenceV3, TimestampNs, TransactionData,
+        RoundNumber, StarfishRbcFieldsV3, StarfishRbcReferenceKindV3, StarfishRbcReferenceV3,
+        TimestampNs, TransactionData,
     },
 };
 
@@ -48,7 +48,7 @@ pub(crate) enum RbcInitialAuthenticator {
     Ed25519(Signer),
     MlDsa44(MlDsa44Signer),
     MlDsa65(MlDsa65Signer),
-    Mac(Signer, BlsSigner),
+    Mac,
 }
 
 impl RbcInitialAuthenticator {
@@ -57,7 +57,7 @@ impl RbcInitialAuthenticator {
             Self::Ed25519(_) => BlockAuthenticationScheme::Ed25519,
             Self::MlDsa44(_) => BlockAuthenticationScheme::MlDsa44,
             Self::MlDsa65(_) => BlockAuthenticationScheme::MlDsa65,
-            Self::Mac(_, _) => BlockAuthenticationScheme::MacVector,
+            Self::Mac => BlockAuthenticationScheme::MacVector,
         }
     }
 }
@@ -160,8 +160,6 @@ pub(crate) enum RbcServiceEvent {
     /// An irrevocable local phase statement waiting to be embedded in the
     /// next ordinary Starfish block.
     ReferenceReady(StarfishRbcReferenceV3),
-    EchoVoteReady(StarfishRbcEchoVoteV3),
-    EchoQcReady(StarfishRbcEchoQcV3),
     Rejected {
         peer: Option<AuthorityIndex>,
         error: RbcServiceError,
@@ -437,14 +435,7 @@ fn validate_local_authenticator(
         RbcInitialAuthenticator::MlDsa65(signer) => committee
             .get_ml_dsa_65_public_key(own_authority)
             .is_some_and(|public_key| public_key == &signer.public_key()),
-        RbcInitialAuthenticator::Mac(signer, echo_signer) => {
-            committee
-                .get_public_key(own_authority)
-                .is_some_and(|public_key| public_key == &signer.public_key())
-                && committee
-                    .get_bls_public_key(own_authority)
-                    .is_some_and(|public_key| public_key == &echo_signer.public_key())
-        }
+        RbcInitialAuthenticator::Mac => committee.known_authority(own_authority),
     };
     if matches {
         Ok(())
@@ -617,7 +608,7 @@ impl RbcServiceState {
                     RbcInitialProof::MlDsa65(signer.sign_digest(&BlockDigest::from(digest)));
                 self.public_initial_proposals(header, proof, transaction_data)
             }
-            RbcInitialAuthenticator::Mac(_, _) => self
+            RbcInitialAuthenticator::Mac => self
                 .committee
                 .authorities()
                 .filter(|recipient| *recipient != self.own_authority)
@@ -826,27 +817,6 @@ impl RbcServiceState {
                     self.pending_fetches.remove(&header.reference());
                     let _ = self.events.send(RbcServiceEvent::Delivered(header));
                 }
-                RbcEffect::PortableEchoVote(target) => {
-                    let RbcInitialAuthenticator::Mac(_, signer) = &self.initial_authenticator
-                    else {
-                        self.reject(None, RbcError::InvalidPortableEchoVote.into());
-                        continue;
-                    };
-                    match self.kernel.portable_echo_signature_digest(target) {
-                        Ok(digest) => {
-                            let vote = StarfishRbcEchoVoteV3::new(
-                                target,
-                                self.own_authority,
-                                signer.sign_digest(&digest),
-                            );
-                            let _ = self.events.send(RbcServiceEvent::EchoVoteReady(vote));
-                        }
-                        Err(error) => self.reject(None, error.into()),
-                    }
-                }
-                RbcEffect::PortableEchoQc(qc) => {
-                    let _ = self.events.send(RbcServiceEvent::EchoQcReady(qc));
-                }
             }
         }
     }
@@ -871,18 +841,6 @@ impl RbcServiceState {
         };
         for evidence in references.references() {
             match self.kernel.handle_embedded_reference(sender, *evidence) {
-                Ok(effects) => self.process_effects(effects),
-                Err(error) => self.reject(Some(sender), error.into()),
-            }
-        }
-        for vote in references.echo_votes() {
-            match self.kernel.handle_portable_echo_vote(*vote) {
-                Ok(effects) => self.process_effects(effects),
-                Err(error) => self.reject(Some(sender), error.into()),
-            }
-        }
-        for qc in references.echo_qcs() {
-            match self.kernel.handle_portable_echo_qc(qc) {
                 Ok(effects) => self.process_effects(effects),
                 Err(error) => self.reject(Some(sender), error.into()),
             }
@@ -1022,8 +980,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{
-            dummy_bls_signer, dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer,
-            mac_keyrings_for_test,
+            dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
         },
         starfish_rbc::RbcPhase,
         types::{TransactionData, VerifiedBlock},
@@ -1058,9 +1015,7 @@ mod tests {
         let keyrings = mac_keyrings_for_test(4);
         let authenticator = match scheme {
             BlockAuthenticationScheme::Ed25519 => RbcInitialAuthenticator::Ed25519(dummy_signer()),
-            BlockAuthenticationScheme::MacVector => {
-                RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer())
-            }
+            BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
             BlockAuthenticationScheme::MlDsa44 => {
                 RbcInitialAuthenticator::MlDsa44(dummy_ml_dsa_44_signer())
             }
@@ -1094,7 +1049,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::MacVector,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedCarrierDag,
@@ -1115,34 +1070,11 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::MacVector,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedSingleDag {
                 echo_qc_fast_path: false,
-            },
-        )
-        .unwrap()
-    }
-
-    fn start_single_dag_fast_service() -> (
-        RbcServiceHandle,
-        mpsc::UnboundedReceiver<RbcServiceEvent>,
-        JoinHandle<()>,
-    ) {
-        let committee = Committee::new_test(vec![1; 4]);
-        let keyrings = mac_keyrings_for_test(4);
-        start_starfish_rbc_service_with_phase_authority(
-            committee,
-            0,
-            instance(),
-            BlockAuthenticationScheme::MacVector,
-            Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
-            1,
-            Duration::from_secs(3_600),
-            RbcPhaseAuthorityV1::EmbeddedSingleDag {
-                echo_qc_fast_path: true,
             },
         )
         .unwrap()
@@ -1287,44 +1219,6 @@ mod tests {
         assert!(staged);
         assert_eq!(initials, 3);
         assert_eq!(references, 1);
-        drop(handle);
-        task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn portable_fast_path_emits_signed_echo_vote_without_phase_message() {
-        let (handle, mut events, task) = start_single_dag_fast_service();
-        let mut header = local_header(1, 4);
-        header.starfish_rbc_v3 = Some(StarfishRbcFieldsV3::default());
-        let canonical = handle.start_local_header(header).await.unwrap();
-        let mut initials = 0;
-        let mut vote = None;
-        for _ in 0..5 {
-            match next_event(&mut events).await {
-                RbcServiceEvent::HeaderStaged(header) => {
-                    assert_eq!(header.reference(), canonical.reference());
-                }
-                RbcServiceEvent::Network {
-                    message: NetworkMessage::RbcInitial(_),
-                    ..
-                } => initials += 1,
-                RbcServiceEvent::EchoVoteReady(echo_vote) => vote = Some(echo_vote),
-                RbcServiceEvent::ReferenceReady(reference)
-                    if reference.kind() == StarfishRbcReferenceKindV3::Echo =>
-                {
-                    panic!("portable mode emitted an unsigned ECHO reference")
-                }
-                RbcServiceEvent::Network {
-                    message: NetworkMessage::RbcPhase(_),
-                    ..
-                } => panic!("portable mode emitted a standalone phase message"),
-                event => panic!("unexpected portable startup event: {event:?}"),
-            }
-        }
-        assert_eq!(initials, 3);
-        let vote = vote.expect("portable mode must emit one signed ECHO vote");
-        assert_eq!(vote.target(), canonical.reference());
-        assert_eq!(vote.sender(), 0);
         drop(handle);
         task.await.unwrap();
     }
@@ -1726,7 +1620,7 @@ mod tests {
             instance(),
             BlockAuthenticationScheme::Ed25519,
             Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac(dummy_signer(), dummy_bls_signer()),
+            RbcInitialAuthenticator::Mac,
             1,
             Duration::from_secs(1),
         );

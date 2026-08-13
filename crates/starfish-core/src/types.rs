@@ -138,78 +138,6 @@ pub struct StarfishRbcReferenceV3 {
     reference: BlockReference,
 }
 
-/// A publicly verifiable ECHO vote carried by an ordinary single-DAG block.
-///
-/// The signature is deliberately independent of the carrying block. A later
-/// block can therefore copy a quorum of votes into a portable certificate
-/// without introducing a standalone RBC phase message.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct StarfishRbcEchoVoteV3 {
-    target: BlockReference,
-    sender: AuthorityIndex,
-    signature: BlsSignatureBytes,
-}
-
-impl StarfishRbcEchoVoteV3 {
-    pub fn new(
-        target: BlockReference,
-        sender: AuthorityIndex,
-        signature: BlsSignatureBytes,
-    ) -> Self {
-        Self {
-            target,
-            sender,
-            signature,
-        }
-    }
-
-    pub fn target(self) -> BlockReference {
-        self.target
-    }
-
-    pub fn sender(self) -> AuthorityIndex {
-        self.sender
-    }
-
-    pub fn signature(self) -> BlsSignatureBytes {
-        self.signature
-    }
-}
-
-/// Portable quorum certificate over exact, publicly verifiable ECHO votes.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct StarfishRbcEchoQcV3 {
-    target: BlockReference,
-    signers: AuthoritySet,
-    signature: BlsSignatureBytes,
-}
-
-impl StarfishRbcEchoQcV3 {
-    pub fn new(
-        target: BlockReference,
-        signers: AuthoritySet,
-        signature: BlsSignatureBytes,
-    ) -> Self {
-        Self {
-            target,
-            signers,
-            signature,
-        }
-    }
-
-    pub fn target(&self) -> BlockReference {
-        self.target
-    }
-
-    pub fn signers(&self) -> AuthoritySet {
-        self.signers
-    }
-
-    pub fn signature(&self) -> BlsSignatureBytes {
-        self.signature
-    }
-}
-
 impl StarfishRbcReferenceV3 {
     pub fn new(kind: StarfishRbcReferenceKindV3, reference: BlockReference) -> Self {
         Self { kind, reference }
@@ -232,51 +160,17 @@ impl StarfishRbcReferenceV3 {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StarfishRbcFieldsV3 {
     references: Vec<StarfishRbcReferenceV3>,
-    #[serde(default)]
-    echo_votes: Vec<StarfishRbcEchoVoteV3>,
-    #[serde(default)]
-    echo_qcs: Vec<StarfishRbcEchoQcV3>,
 }
 
 impl StarfishRbcFieldsV3 {
     pub fn new(mut references: Vec<StarfishRbcReferenceV3>) -> Self {
         references.sort_unstable();
         references.dedup();
-        Self {
-            references,
-            echo_votes: Vec::new(),
-            echo_qcs: Vec::new(),
-        }
-    }
-
-    pub fn with_portable_echo(
-        mut references: Vec<StarfishRbcReferenceV3>,
-        mut echo_votes: Vec<StarfishRbcEchoVoteV3>,
-        mut echo_qcs: Vec<StarfishRbcEchoQcV3>,
-    ) -> Self {
-        references.sort_unstable();
-        references.dedup();
-        echo_votes.sort_unstable();
-        echo_votes.dedup();
-        echo_qcs.sort_unstable();
-        echo_qcs.dedup();
-        Self {
-            references,
-            echo_votes,
-            echo_qcs,
-        }
+        Self { references }
     }
 
     pub fn references(&self) -> &[StarfishRbcReferenceV3] {
         &self.references
-    }
-
-    pub fn echo_votes(&self) -> &[StarfishRbcEchoVoteV3] {
-        &self.echo_votes
-    }
-
-    pub fn echo_qcs(&self) -> &[StarfishRbcEchoQcV3] {
-        &self.echo_qcs
     }
 
     pub(crate) fn validate_for_block(
@@ -287,54 +181,17 @@ impl StarfishRbcFieldsV3 {
         if self.references.len() > committee.len().saturating_mul(6) {
             return false;
         }
-        if self.echo_votes.len() > committee.len().saturating_mul(3)
-            || self.echo_qcs.len() > committee.len()
-        {
-            return false;
-        }
         if self.references.windows(2).any(|pair| pair[0] >= pair[1]) {
             return false;
         }
         let mut statements = AHashSet::new();
-        let references_valid = self.references.iter().all(|evidence| {
+        self.references.iter().all(|evidence| {
             let reference = evidence.reference();
             reference.round > 0
                 && reference.round <= block_round
                 && committee.known_authority(reference.authority)
                 && statements.insert((evidence.kind(), reference.authority, reference.round))
-        });
-        if !references_valid
-            || self.echo_votes.windows(2).any(|pair| pair[0] >= pair[1])
-            || self.echo_qcs.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return false;
-        }
-        let votes_valid = self.echo_votes.iter().all(|vote| {
-            let target = vote.target();
-            target.round > 0
-                && target.round <= block_round
-                && committee.known_authority(target.authority)
-                && committee.known_authority(vote.sender())
-        });
-        votes_valid
-            && self.echo_qcs.iter().all(|qc| {
-                let target = qc.target();
-                if target.round == 0
-                    || target.round >= block_round
-                    || !committee.known_authority(target.authority)
-                    || qc.signers().is_empty()
-                {
-                    return false;
-                }
-                let mut stake = 0;
-                for sender in qc.signers().present() {
-                    if !committee.known_authority(sender) {
-                        return false;
-                    }
-                    stake += committee.get_stake(sender).unwrap_or_default();
-                }
-                committee.is_quorum(stake)
-            })
+        })
     }
 }
 
@@ -2502,9 +2359,7 @@ fn verify_signed_quorum(
     Ok(())
 }
 
-#[derive(
-    Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Serialize, Deserialize, Default, Debug,
-)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
 pub struct AuthoritySet([u64; MAX_COMMITTEE_WORDS]);
 
 pub type TimestampNs = u64;

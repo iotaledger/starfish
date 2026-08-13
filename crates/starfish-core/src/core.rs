@@ -39,8 +39,7 @@ use crate::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
         BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
         ProvableShard, ReconstructedTransactionData, RoundNumber, SailfishFields, Shard,
-        StarfishRbcEchoQcV3, StarfishRbcEchoVoteV3, StarfishRbcFieldsV3, StarfishRbcReferenceV3,
-        VerifiedBlock,
+        StarfishRbcFieldsV3, StarfishRbcReferenceV3, VerifiedBlock,
     },
 };
 
@@ -58,8 +57,6 @@ pub struct Core<H: BlockHandler> {
     /// Irrevocable local ECHO/READY statements waiting to ride on the next
     /// ordinary block in the single-DAG protocol.
     pending_starfish_rbc_references: BTreeSet<StarfishRbcReferenceV3>,
-    pending_starfish_rbc_echo_votes: BTreeSet<StarfishRbcEchoVoteV3>,
-    pending_starfish_rbc_echo_qcs: BTreeSet<StarfishRbcEchoQcV3>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
@@ -326,8 +323,6 @@ impl<H: BlockHandler> Core<H> {
             pending,
             pending_reconstructed_data: AHashMap::new(),
             pending_starfish_rbc_references: BTreeSet::new(),
-            pending_starfish_rbc_echo_votes: BTreeSet::new(),
-            pending_starfish_rbc_echo_qcs: BTreeSet::new(),
             last_own_block: vec![last_own_block],
             block_handler,
             authority,
@@ -363,10 +358,6 @@ impl<H: BlockHandler> Core<H> {
         &self.signer
     }
 
-    pub fn get_bls_signer(&self) -> &BlsSigner {
-        &self.bls_signer
-    }
-
     pub(crate) fn add_starfish_rbc_reference(&mut self, reference: StarfishRbcReferenceV3) {
         assert!(
             self.dag_state
@@ -375,24 +366,6 @@ impl<H: BlockHandler> Core<H> {
             "embedded RBC references require single-DAG Starfish-RBC"
         );
         self.pending_starfish_rbc_references.insert(reference);
-    }
-
-    pub(crate) fn add_starfish_rbc_echo_vote(&mut self, vote: StarfishRbcEchoVoteV3) {
-        assert!(
-            self.dag_state
-                .consensus_protocol
-                .is_starfish_rbc_single_dag()
-        );
-        self.pending_starfish_rbc_echo_votes.insert(vote);
-    }
-
-    pub(crate) fn add_starfish_rbc_echo_qc(&mut self, qc: StarfishRbcEchoQcV3) {
-        assert!(
-            self.dag_state
-                .consensus_protocol
-                .is_starfish_rbc_single_dag()
-        );
-        self.pending_starfish_rbc_echo_qcs.insert(qc);
     }
 
     pub(crate) fn get_ml_dsa_44_signer(&self) -> &crate::crypto::MlDsa44Signer {
@@ -884,27 +857,7 @@ impl<H: BlockHandler> Core<H> {
             for reference in &references {
                 self.pending_starfish_rbc_references.remove(reference);
             }
-            let echo_votes: Vec<_> = self
-                .pending_starfish_rbc_echo_votes
-                .iter()
-                .filter(|vote| vote.target().round <= clock_round)
-                .take(self.committee.len().saturating_mul(3))
-                .copied()
-                .collect();
-            for vote in &echo_votes {
-                self.pending_starfish_rbc_echo_votes.remove(vote);
-            }
-            let echo_qcs: Vec<_> = self
-                .pending_starfish_rbc_echo_qcs
-                .iter()
-                .filter(|qc| qc.target().round < clock_round)
-                .take(self.committee.len())
-                .cloned()
-                .collect();
-            for qc in &echo_qcs {
-                self.pending_starfish_rbc_echo_qcs.remove(qc);
-            }
-            StarfishRbcFieldsV3::with_portable_echo(references, echo_votes, echo_qcs)
+            StarfishRbcFieldsV3::new(references)
         });
 
         // Create and store blocks

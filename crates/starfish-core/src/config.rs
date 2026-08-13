@@ -94,9 +94,10 @@ pub struct NodeParameters {
     /// Starfish finality proof shape.
     #[serde(default)]
     pub starfish_rbc_dag_vote_qc_fast_path: bool,
-    /// Testbed single-DAG RBC path: publicly signed ECHO votes are copied into
-    /// a portable quorum certificate carried by an ordinary DAG block. This
-    /// preserves uniqueness and totality without a standalone phase message.
+    /// Testbed-only single-DAG RBC path: deliver an exact header after quorum
+    /// ECHO rather than quorum READY. Quorum intersection preserves a unique
+    /// value, but selective Byzantine ECHO withholding can violate totality;
+    /// this must remain an explicit benchmark flag.
     #[serde(default)]
     pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
     /// Benchmark-only profile that writes the framed shadow WAL in order but

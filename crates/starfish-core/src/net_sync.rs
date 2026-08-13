@@ -3192,10 +3192,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     BlockAuthenticationScheme::MlDsa65 => {
                         RbcInitialAuthenticator::MlDsa65(core.get_ml_dsa_65_signer().clone())
                     }
-                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac(
-                        core.get_signer().clone(),
-                        core.get_bls_signer().clone(),
-                    ),
+                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
                 };
                 let (service, events, task) = start_starfish_rbc_service_with_phase_authority(
                     committee.clone(),
@@ -3570,15 +3567,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .syncer
                                 .apply_starfish_rbc_reference(reference)
                                 .await;
-                        }
-                        RbcServiceEvent::EchoVoteReady(vote) => {
-                            event_inner
-                                .syncer
-                                .apply_starfish_rbc_echo_vote(vote)
-                                .await;
-                        }
-                        RbcServiceEvent::EchoQcReady(qc) => {
-                            event_inner.syncer.apply_starfish_rbc_echo_qc(qc).await;
                         }
                         RbcServiceEvent::Rejected { peer, error } => {
                             tracing::warn!(
