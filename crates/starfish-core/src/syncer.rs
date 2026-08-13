@@ -410,6 +410,16 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.try_new_block(BlockCreationReason::CertificateEvent);
     }
 
+    pub fn apply_starfish_rbc_echo_vote(&mut self, vote: crate::types::StarfishRbcEchoVoteV3) {
+        self.core.add_starfish_rbc_echo_vote(vote);
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+    }
+
+    pub fn apply_starfish_rbc_echo_qc(&mut self, qc: crate::types::StarfishRbcEchoQcV3) {
+        self.core.add_starfish_rbc_echo_qc(qc);
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+    }
+
     /// Sequence one exact deterministic carrier-frontier delta. In M7 this is
     /// the sole application-ordering authority; the legacy Starfish committer
     /// remains disabled in this mode.

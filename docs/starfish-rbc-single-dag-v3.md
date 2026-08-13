@@ -35,8 +35,10 @@ is one of:
 - `Ready(BlockReference)`.
 
 The carrying block's authenticated author is the statement sender. The list is
-part of that ordinary block's content digest. Consequently no standalone phase
-MAC, signature, or phase network message is needed.
+part of that ordinary block's content digest. Consequently the default path
+needs no standalone phase MAC, signature, or phase network message. The
+portable fast path adds embedded BLS ECHO votes and an aggregate QC, but still
+adds no phase message.
 
 References are sorted, duplicate-free and bounded by `6 * committee_size` per
 block. A sender may name at most one digest for each `(phase, target author,
@@ -87,19 +89,29 @@ create a second physical round counter.
 - Recovery content must recompute to the exact requested `BlockReference`.
 - Frozen direct-RBC and carrier-DAG formats retain their old domains.
 
-### Explicit testbed ECHO-QC fast path
+### Portable ECHO-QC fast path
 
 Finite benchmarks may opt into
-`--starfish-rbc-single-dag-echo-qc-fast-path`. In that mode a node delivers an
-exact header as soon as it has quorum locked ECHO statements, while still
-emitting the normal READY statement. Quorum intersection prevents two
-different headers from both obtaining such a certificate, so agreement is
-preserved. The current wire format does not carry the exact ECHO witness set,
-however: Byzantine ECHO senders can selectively reveal their statements so
-one honest node obtains quorum while another never can. Consequently the flag
-does **not** provide the normal RBC totality guarantee and is rejected for
-unbounded/production runs. The default V3 path continues to require quorum
-READY.
+`--starfish-rbc-single-dag-echo-qc-fast-path`. In that mode ECHO is a compact
+BLS vote over the exact target reference, protocol instance and committee.
+Votes ride in ordinary DAG blocks. Once quorum stake verifies, the node batch
+aggregates them into one portable certificate containing the target, signer
+bitmap and 48-byte aggregate signature. The QC also rides in an ordinary DAG
+block; there is no standalone ECHO or READY message.
+
+An honest node publishes or relays the QC before its delivery effect. The
+ordered Core bridge queues the QC-bearing block before applying delivery.
+Quorum intersection gives uniqueness, while public verification and mandatory
+relay remove the old receiver-local selective-withholding caveat: any valid QC
+that reaches one honest validator can be verified and propagated by every
+other validator. Missing target content still uses exact header recovery and
+delivery remains fail-closed until that content is present. Invalid aggregate
+batches fall back to individual vote verification so one Byzantine vote cannot
+poison an otherwise valid quorum.
+
+The flag remains testbed-only because bounded retirement, durable pending-QC
+replay and a complete asynchronous proof are still production follow-ups. The
+default V3 path continues to use the conventional quorum-READY rule.
 
 ## Required validation
 
@@ -119,10 +131,13 @@ with MAC authentication and the fixed 50 ms V3 round limiter:
 | --- | ---: | ---: | ---: | ---: |
 | `starfish-rbc-single-dag` | zero | 498.3 ms | 1,000 | 0.79 MB/s |
 | `starfish-rbc-single-dag` | AWS table | 1,285.7 ms | 1,000 | 0.61 MB/s |
-| V3 + flagged ECHO-QC | AWS table | 961.0 ms | 1,000 | 0.61 MB/s |
-| V3 + flagged ECHO-QC, n=40 | AWS table | 977.35 ms | 1,000 | 3.04 MB/s |
+| V3 + old receiver-local ECHO-QC | AWS table | 961.0 ms | 1,000 | 0.61 MB/s |
+| V3 + old receiver-local ECHO-QC, n=40 | AWS table | 977.35 ms | 1,000 | 3.04 MB/s |
+| V3 + portable aggregate ECHO-QC | zero | 405.8 ms | 1,000 | 1.06 MB/s |
+| V3 + portable aggregate ECHO-QC | AWS table | 983.7 ms | 1,000 | 0.74 MB/s |
 | `starfish-mac` lower bound | AWS table | 610.0 ms | 1,000 | 0.61 MB/s |
 
 All exact offered transactions committed during the bounded drain. These are
-single-machine research measurements, not production claims. In particular,
-both ECHO-QC rows carry the totality limitation above.
+single-machine research measurements, not production claims. The two old
+receiver-local rows preserve the historical totality caveat; the new portable
+rows use the signed aggregate certificate described above.
