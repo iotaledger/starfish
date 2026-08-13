@@ -416,7 +416,10 @@ async fn local_benchmark(
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     load /= committee.len();
-    let parameters = Parameters::almost_default(load);
+    let mut parameters = Parameters::almost_default(load);
+    // Marks this explicitly bounded local run as a testbed execution. The
+    // receiver-local quorum-ECHO path is rejected when no finite bound exists.
+    parameters.benchmark_duration = Some(Duration::from_secs(duration_secs));
     // Equivocating Byzantine strategies must not generate transactions.
     let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
         .is_some_and(|s| s.is_equivocating())
@@ -703,74 +706,11 @@ async fn dryrun(
     Ok(())
 }
 
-fn ensure_starfish_rbc_protocol_instance(
-    consensus_protocol: &str,
-    node_parameters: &mut NodeParameters,
-) {
-    if is_starfish_rbc_selection(consensus_protocol)
-        && node_parameters.starfish_rbc_protocol_instance.is_none()
-    {
-        node_parameters.refresh_starfish_rbc_protocol_instance();
-    }
-}
-
 fn is_starfish_rbc_selection(consensus_protocol: &str) -> bool {
     matches!(
         consensus_protocol,
         "starfish-rbc" | "starfish-rbc-single-dag"
     )
-}
-
-fn validate_local_benchmark_port_offset(
-    public_config: &NodePublicConfig,
-    port_offset: u16,
-) -> Result<()> {
-    eyre::ensure!(
-        public_config.all_network_addresses().all(|address| {
-            address
-                .port()
-                .checked_add(port_offset)
-                .is_some_and(|port| port <= LOCAL_BENCHMARK_MAX_ACTIVE_BIND_PORT / 10)
-        }),
-        "local benchmark port offset {port_offset} places a derived active-bind port in the OS ephemeral range; choose a smaller offset"
-    );
-    Ok(())
-}
-
-fn preflight_local_benchmark_ports(public_config: &NodePublicConfig) -> Result<()> {
-    let mut addresses = BTreeSet::new();
-    for address in public_config.all_network_addresses() {
-        addresses.insert(address);
-        let mut active = address;
-        active.set_port(
-            address
-                .port()
-                .checked_mul(10)
-                .expect("validated local benchmark active port"),
-        );
-        addresses.insert(active);
-    }
-    addresses.extend(public_config.all_metric_addresses());
-
-    // The network listeners enable SO_REUSEPORT. A plain bind probe can
-    // therefore succeed even while a stale benchmark is still serving the
-    // same address. Probe for an existing listener first, then reserve every
-    // address for the duration of this check.
-    for address in &addresses {
-        eyre::ensure!(
-            TcpStream::connect_timeout(address, Duration::from_millis(25)).is_err(),
-            "local benchmark port {address} is already served by another process"
-        );
-    }
-
-    let mut reservations = Vec::with_capacity(addresses.len());
-    for address in addresses {
-        reservations.push(
-            TcpListener::bind(address)
-                .wrap_err_with(|| format!("local benchmark port {address} is already in use"))?,
-        );
-    }
-    Ok(())
 }
 fn ipv4_add_offset(base: Ipv4Addr, offset: usize) -> Result<Ipv4Addr> {
     let offset = u32::try_from(offset).context("validator count exceeds IPv4 offset range")?;
@@ -886,7 +826,7 @@ mod tests {
             "--committee-size",
             "4",
             "--consensus",
-            "starfish-rbc",
+            "starfish-rbc-single-dag",
             "--block-authentication",
             "mac",
             "--starfish-rbc-single-dag-echo-qc-fast-path",
@@ -902,24 +842,8 @@ mod tests {
         else {
             panic!("expected local-benchmark operation");
         };
-        assert_eq!(consensus, "starfish-rbc");
+        assert_eq!(consensus, "starfish-rbc-single-dag");
         assert_eq!(block_authentication.as_deref(), Some("mac"));
         assert!(starfish_rbc_single_dag_echo_qc_fast_path);
-    }
-
-    #[test]
-    fn dry_run_starfish_rbc_configuration_gets_a_protocol_instance() {
-        let mut parameters = NodeParameters {
-            starfish_rbc_dag_shadow: true,
-            ..NodeParameters::default()
-        };
-
-        ensure_starfish_rbc_protocol_instance("starfish-rbc", &mut parameters);
-
-        assert!(
-            parameters
-                .starfish_rbc_protocol_instance
-                .is_some_and(|instance| instance != [0; 32])
-        );
     }
 }

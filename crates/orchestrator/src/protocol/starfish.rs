@@ -263,7 +263,10 @@ impl StarfishProtocol {
         consensus_protocol: &str,
         mut node_parameters: StarfishNodeParameters,
     ) -> StarfishNodeParameters {
-        if consensus_protocol == "starfish-rbc" {
+        if matches!(
+            consensus_protocol,
+            "starfish-rbc" | "starfish-rbc-single-dag"
+        ) {
             node_parameters.refresh_starfish_rbc_protocol_instance();
         }
         node_parameters
@@ -303,15 +306,17 @@ mod tests {
 
     #[test]
     fn starfish_rbc_genesis_gets_one_nonzero_protocol_instance() {
-        let parameters = StarfishProtocol::node_parameters_for_genesis(
-            "starfish-rbc",
-            StarfishNodeParameters::default(),
-        );
-        assert!(
-            parameters
-                .starfish_rbc_protocol_instance
-                .is_some_and(|instance| instance != [0; 32])
-        );
+        for protocol in ["starfish-rbc", "starfish-rbc-single-dag"] {
+            let parameters = StarfishProtocol::node_parameters_for_genesis(
+                protocol,
+                StarfishNodeParameters::default(),
+            );
+            assert!(
+                parameters
+                    .starfish_rbc_protocol_instance
+                    .is_some_and(|instance| instance != [0; 32])
+            );
+        }
     }
 
     #[test]

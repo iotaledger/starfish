@@ -347,7 +347,7 @@ mod smoke_tests {
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
-        if consensus == "starfish-rbc" {
+        if matches!(consensus, "starfish-rbc" | "starfish-rbc-single-dag") {
             public_config
                 .parameters
                 .refresh_starfish_rbc_protocol_instance();
@@ -383,7 +383,12 @@ mod smoke_tests {
         // Four RBC authentication variants run in parallel in the full test
         // suite and include expensive ML-DSA signing. Give that composed flow
         // enough scheduling headroom without relaxing existing protocols.
-        let timeout_multiplier = if consensus == "starfish-rbc" { 20 } else { 5 };
+        let timeout_multiplier = if matches!(consensus, "starfish-rbc" | "starfish-rbc-single-dag")
+        {
+            20
+        } else {
+            5
+        };
         let timeout = config::param_defaults::default_leader_timeout() * timeout_multiplier;
 
         tokio::select! {
@@ -429,6 +434,7 @@ mod smoke_tests {
     #[test_case("starfish-rbc", Some("mac"), 1440)]
     #[test_case("starfish-rbc", Some("ml-dsa-44"), 1480)]
     #[test_case("starfish-rbc", Some("ml-dsa-65"), 1520)]
+    #[test_case("starfish-rbc-single-dag", Some("mac"), 1640)]
     #[tokio::test]
     async fn validator_commit(
         consensus: &str,
@@ -485,7 +491,7 @@ mod smoke_tests {
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
-        if consensus == "starfish-rbc" {
+        if matches!(consensus, "starfish-rbc" | "starfish-rbc-single-dag") {
             public_config
                 .parameters
                 .refresh_starfish_rbc_protocol_instance();
@@ -588,6 +594,7 @@ mod smoke_tests {
     #[test_case("bluestreak", Some("ml-dsa-44"), 980)]
     #[test_case("bluestreak", Some("ml-dsa-65"), 1260)]
     #[test_case("starfish-rbc", Some("mac"), 1560)]
+    #[test_case("starfish-rbc-single-dag", Some("mac"), 1660)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         run_sync_test(consensus, block_authentication, port_offset).await;

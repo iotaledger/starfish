@@ -35,8 +35,9 @@ NUM_NODES=10 DESIRED_TPS=1000 CONSENSUS=starfish \
 
 Supported `CONSENSUS` values are `starfish`, `starfish-speed`,
 `sparse-starfish-speed`, `bluestreak`, `starfish-bls`, `cordial-miners`,
-`mysticeti`, `sailfish-pp`, and `mysticeti-bls`. `BLOCK_AUTHENTICATION`
-selects Ed25519, ML-DSA-44, or ML-DSA-65 for any of them. The
+`mysticeti`, `sailfish-pp`, `mysticeti-bls`, `starfish-rbc`, and
+`starfish-rbc-single-dag`. `BLOCK_AUTHENTICATION` selects Ed25519, ML-DSA-44,
+ML-DSA-65, or `mac` (the latter only for Starfish-RBC) for any of them. The
 `starfish-mac`, `starfish-speed-mac`, `sparse-starfish-speed-mac`, and
 `bluestreak-mac` names are separate experimental protocols; leave
 `BLOCK_AUTHENTICATION` unset when using one.

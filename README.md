@@ -8,7 +8,7 @@
 This repository is a benchmarking framework for DAG-based BFT
 consensus protocols in the partially synchronous model, implemented
 in Rust.
-It includes 10 protocol implementations with configurable
+It includes 11 protocol implementations with configurable
 dissemination strategies, storage backends, and Byzantine fault
 injection.
 
@@ -23,6 +23,7 @@ injection.
 | Sparse-Starfish-Speed | `sparse-starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | -- |
 | Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
 | Starfish-RBC (prototype) | `starfish-rbc` | TBD | RBC-certified headers | Encoded | Push | TBD | TBD | [design](docs/starfish-rbc-protocol.md) |
+| Single-DAG Starfish-RBC (testbed) | `starfish-rbc-single-dag` | TBD | RBC-certified blocks | Encoded | Push | TBD | TBD | [design](docs/starfish-rbc-single-dag-v3.md) |
 | Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |
 | Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
 | Starfish-BLS | `starfish-bls` | 6.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
@@ -48,6 +49,10 @@ acknowledgment references between validators.
 headers. ECHO and READY are recipient-authenticated with pairwise MACs; the author's INIT can use
 Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctness-oriented research
 prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
+**Single-DAG Starfish-RBC** embeds ECHO/READY references in ordinary Starfish
+blocks, avoiding a second carrier DAG. Its optional receiver-local quorum-ECHO
+flag is a signature-free latency lower bound and does not provide Byzantine
+totality; see the [V3 design](docs/starfish-rbc-single-dag-v3.md).
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's

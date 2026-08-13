@@ -303,7 +303,7 @@ mod tests {
         .dag_state
     }
 
-    fn open_rbc_dag_state(committee: Arc<Committee>, path: &std::path::Path) -> DagState {
+    fn open_starfish_rbc_state(committee: Arc<Committee>, path: &std::path::Path) -> DagState {
         let registry = Registry::new();
         let (metrics, _reporter) = Metrics::new(
             &registry,
@@ -421,7 +421,7 @@ mod tests {
     fn starfish_rbc_requests_ack_only_dependencies_and_deduplicates_parent_overlap() {
         let committee = Committee::new_for_benchmarks(4);
         let temp_dir = TempDir::new().unwrap();
-        let dag_state = open_rbc_dag_state(committee.clone(), temp_dir.path());
+        let dag_state = open_starfish_rbc_state(committee.clone(), temp_dir.path());
         let mut manager = BlockManager::new(dag_state, &committee);
         let genesis: Vec<_> = committee
             .authorities()

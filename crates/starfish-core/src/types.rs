@@ -3315,7 +3315,7 @@ mod tests {
     }
 
     #[test]
-    fn starfish_rbc_carrier_uses_canonical_content_identity_without_authentication() {
+    fn starfish_rbc_header_uses_canonical_content_identity_without_authentication() {
         let parents = vec![
             BlockReference::new_test(0, 1),
             BlockReference::new_test(1, 1),
@@ -3338,7 +3338,7 @@ mod tests {
         let commitment = block
             .header()
             .transactions_commitment
-            .expect("RBC carrier must commit its Starfish payload");
+            .expect("RBC header must commit its Starfish payload");
         assert_eq!(
             block.digest(),
             BlockDigest::new_starfish_rbc_header(
@@ -3402,7 +3402,7 @@ mod tests {
     }
 
     #[test]
-    fn starfish_rbc_carrier_verification_is_content_only() {
+    fn starfish_rbc_header_verification_is_content_only() {
         let committee = Committee::new_for_benchmarks(4);
         let parents: Vec<_> = committee
             .authorities()

@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeSet, fmt, mem, sync::Arc};
+use std::{collections::BTreeSet, mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
@@ -520,7 +520,8 @@ impl<H: BlockHandler> Core<H> {
         let protocol = self.dag_state.consensus_protocol;
 
         // Dual-DAG protocols: require clean parent quorum before creating a block.
-        if protocol.uses_dual_dag() && !protocol.is_starfish_rbc_single_dag()
+        if protocol.uses_dual_dag()
+            && !protocol.is_starfish_rbc_single_dag()
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
@@ -537,7 +538,8 @@ impl<H: BlockHandler> Core<H> {
         // Starfish-RBC that local header is dirty until the local RBC instance
         // delivers it; another clean quorum must not let us smuggle this dirty
         // mandatory parent into a proposal.
-        if protocol.is_starfish_rbc() && !protocol.is_starfish_rbc_single_dag()
+        if protocol.is_starfish_rbc()
+            && !protocol.is_starfish_rbc_single_dag()
             && clock_round > 1
             && self
                 .last_own_block

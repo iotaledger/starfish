@@ -2,11 +2,8 @@
 
 ## Status
 
-This is the active experimental successor to the two-plane carrier prototype
-documented in `starfish-rbc-dag-protocol.md`. It is selected as
-`starfish-rbc-single-dag`. The old implementation remains available as a
-benchmark baseline; its carrier and projection formats are frozen and are not
-reinterpreted as V3.
+This is the active experimental one-block design built on the direct-header
+Starfish-RBC implementation. It is selected as `starfish-rbc-single-dag`.
 
 V3 is a research-testbed protocol. Crash recovery, bounded retirement and the
 complete asynchronous safety/liveness proof remain required before production
@@ -85,7 +82,7 @@ create a second physical round counter.
 - RBC delivery never follows from dirty-DAG admission alone.
 - Consensus parent selection and commitment use only clean vertices.
 - Recovery content must recompute to the exact requested `BlockReference`.
-- Frozen direct-RBC and carrier-DAG formats retain their old domains.
+- Direct-RBC formats retain their existing domains.
 
 ### Receiver-local quorum-ECHO latency lower bound
 
@@ -121,7 +118,7 @@ conflicting sender locks, dirty-clock progress, clean dependency closure,
 embedded ECHO/READY delivery, absence of normal phase messages, Byzantine
 withholding with bounded recovery, restart replay and deterministic Starfish
 commit order. Matched n=10 and n=40 zero/AWS runs must compare V3 against the
-frozen carrier baseline using identical load and duration.
+direct-RBC baseline using identical load and duration.
 
 ## Testbed checkpoint
 

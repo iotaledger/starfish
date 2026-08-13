@@ -1663,8 +1663,8 @@ mod tests {
             .collect();
         let expected = tags[2];
         block.header.authentication = BlockAuthentication::MacVector(tags);
-        let mut rbc_carrier = block.clone();
-        rbc_carrier.header.authentication = BlockAuthentication::None;
+        let mut rbc_header = block.clone();
+        rbc_header.header.authentication = BlockAuthentication::None;
 
         let relayed = prepare_forwarded_blocks_for_peer(
             BlockAuthenticationScheme::MacVector,
@@ -1686,15 +1686,15 @@ mod tests {
         );
         assert!(second_hop.is_empty());
 
-        let forwarded_rbc_carrier = prepare_forwarded_blocks_for_peer(
+        let forwarded_rbc_header = prepare_forwarded_blocks_for_peer(
             BlockAuthenticationScheme::MacVector,
             ConsensusProtocol::StarfishRbc,
             3,
-            vec![Data::new(rbc_carrier)],
+            vec![Data::new(rbc_header)],
         );
-        assert_eq!(forwarded_rbc_carrier.len(), 1);
+        assert_eq!(forwarded_rbc_header.len(), 1);
         assert!(matches!(
-            forwarded_rbc_carrier[0].authentication(),
+            forwarded_rbc_header[0].authentication(),
             BlockAuthentication::None
         ));
     }

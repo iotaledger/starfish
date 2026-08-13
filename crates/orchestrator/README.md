@@ -136,6 +136,9 @@ for any protocol with `--block-authentication ed25519|ml-dsa-44|ml-dsa-65`;
 Ed25519 is the default. The `starfish-mac`, `starfish-speed-mac`,
 `sparse-starfish-speed-mac`, and `bluestreak-mac` names are separate
 experimental protocols and cannot be combined with that option.
+The research protocols `starfish-rbc` and `starfish-rbc-single-dag` are also
+available; pairwise-MAC initial authentication is selected with
+`--block-authentication mac`.
 
 To run with Byzantine validators:
 

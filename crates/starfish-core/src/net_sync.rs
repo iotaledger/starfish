@@ -46,7 +46,8 @@ use crate::{
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     starfish_rbc::{RbcCanonicalHeader, RbcProtocolInstanceId},
     starfish_rbc_service::{
-        RbcInitialAuthenticator, RbcServiceEvent, RbcServiceHandle, start_starfish_rbc_service,
+        RbcInitialAuthenticator, RbcPhaseAuthorityV1, RbcServiceEvent, RbcServiceHandle,
+        start_starfish_rbc_service_with_phase_authority,
     },
     syncer::{CommitObserver, STARFISH_RBC_SINGLE_DAG_ROUND_INTERVAL, Syncer, SyncerSignals},
     types::{
@@ -146,8 +147,8 @@ fn verify_starfish_rbc_transaction_payload(
 /// specific peer. Legacy MAC-experiment blocks retain their complete vector
 /// only at direct recipients; forwarding selects the destination's tag. A
 /// tag-only copy cannot be forwarded again and is therefore omitted.
-/// Starfish-RBC carriers are authentication-free and remain forwardable: the
-/// separate RBC service, rather than the carrier, controls clean admission.
+/// Direct Starfish-RBC header blocks are authentication-free and remain
+/// forwardable: the separate RBC service controls clean admission.
 pub(crate) fn prepare_forwarded_blocks_for_peer(
     authentication_scheme: BlockAuthenticationScheme,
     consensus_protocol: ConsensusProtocol,
