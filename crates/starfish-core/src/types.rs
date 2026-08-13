@@ -138,29 +138,75 @@ pub struct StarfishRbcReferenceV3 {
     reference: BlockReference,
 }
 
-/// Signature-free portable quorum certificate over exact ordinary-DAG blocks
-/// that carry `ECHO(target)`. Every witness block is independently
-/// authenticated with its author's complete MAC vector; a holder can relay
-/// that vector and each receiver verifies only its own entry.
+/// A publicly verifiable ECHO vote carried by an ordinary single-DAG block.
+///
+/// The signature is deliberately independent of the carrying block. A later
+/// block can therefore copy a quorum of votes into a portable certificate
+/// without introducing a standalone RBC phase message.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct StarfishRbcEchoVoteV3 {
+    target: BlockReference,
+    sender: AuthorityIndex,
+    signature: BlsSignatureBytes,
+}
+
+impl StarfishRbcEchoVoteV3 {
+    pub fn new(
+        target: BlockReference,
+        sender: AuthorityIndex,
+        signature: BlsSignatureBytes,
+    ) -> Self {
+        Self {
+            target,
+            sender,
+            signature,
+        }
+    }
+
+    pub fn target(self) -> BlockReference {
+        self.target
+    }
+
+    pub fn sender(self) -> AuthorityIndex {
+        self.sender
+    }
+
+    pub fn signature(self) -> BlsSignatureBytes {
+        self.signature
+    }
+}
+
+/// Portable quorum certificate over exact, publicly verifiable ECHO votes.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct StarfishRbcEchoQcV3 {
     target: BlockReference,
-    witnesses: Vec<BlockReference>,
+    signers: AuthoritySet,
+    signature: BlsSignatureBytes,
 }
 
 impl StarfishRbcEchoQcV3 {
-    pub fn new(target: BlockReference, mut witnesses: Vec<BlockReference>) -> Self {
-        witnesses.sort_unstable();
-        witnesses.dedup();
-        Self { target, witnesses }
+    pub fn new(
+        target: BlockReference,
+        signers: AuthoritySet,
+        signature: BlsSignatureBytes,
+    ) -> Self {
+        Self {
+            target,
+            signers,
+            signature,
+        }
     }
 
     pub fn target(&self) -> BlockReference {
         self.target
     }
 
-    pub fn witnesses(&self) -> &[BlockReference] {
-        &self.witnesses
+    pub fn signers(&self) -> AuthoritySet {
+        self.signers
+    }
+
+    pub fn signature(&self) -> BlsSignatureBytes {
+        self.signature
     }
 }
 
@@ -187,6 +233,8 @@ impl StarfishRbcReferenceV3 {
 pub struct StarfishRbcFieldsV3 {
     references: Vec<StarfishRbcReferenceV3>,
     #[serde(default)]
+    echo_votes: Vec<StarfishRbcEchoVoteV3>,
+    #[serde(default)]
     echo_qcs: Vec<StarfishRbcEchoQcV3>,
 }
 
@@ -196,26 +244,35 @@ impl StarfishRbcFieldsV3 {
         references.dedup();
         Self {
             references,
+            echo_votes: Vec::new(),
             echo_qcs: Vec::new(),
         }
     }
 
     pub fn with_portable_echo(
         mut references: Vec<StarfishRbcReferenceV3>,
+        mut echo_votes: Vec<StarfishRbcEchoVoteV3>,
         mut echo_qcs: Vec<StarfishRbcEchoQcV3>,
     ) -> Self {
         references.sort_unstable();
         references.dedup();
+        echo_votes.sort_unstable();
+        echo_votes.dedup();
         echo_qcs.sort_unstable();
         echo_qcs.dedup();
         Self {
             references,
+            echo_votes,
             echo_qcs,
         }
     }
 
     pub fn references(&self) -> &[StarfishRbcReferenceV3] {
         &self.references
+    }
+
+    pub fn echo_votes(&self) -> &[StarfishRbcEchoVoteV3] {
+        &self.echo_votes
     }
 
     pub fn echo_qcs(&self) -> &[StarfishRbcEchoQcV3] {
@@ -230,7 +287,9 @@ impl StarfishRbcFieldsV3 {
         if self.references.len() > committee.len().saturating_mul(6) {
             return false;
         }
-        if self.echo_qcs.len() > committee.len() {
+        if self.echo_votes.len() > committee.len().saturating_mul(3)
+            || self.echo_qcs.len() > committee.len()
+        {
             return false;
         }
         if self.references.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -244,34 +303,38 @@ impl StarfishRbcFieldsV3 {
                 && committee.known_authority(reference.authority)
                 && statements.insert((evidence.kind(), reference.authority, reference.round))
         });
-        if !references_valid || self.echo_qcs.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if !references_valid
+            || self.echo_votes.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.echo_qcs.windows(2).any(|pair| pair[0] >= pair[1])
+        {
             return false;
         }
-        self.echo_qcs.iter().all(|qc| {
-            let target = qc.target();
-            if target.round == 0
-                || target.round >= block_round
-                || !committee.known_authority(target.authority)
-                || qc.witnesses().is_empty()
-                || qc.witnesses().len() > committee.len()
-                || qc.witnesses().windows(2).any(|pair| pair[0] >= pair[1])
-            {
-                return false;
-            }
-            let mut stake = 0;
-            let mut authors = AHashSet::new();
-            for witness in qc.witnesses() {
-                if witness.round == 0
-                    || witness.round >= block_round
-                    || !committee.known_authority(witness.authority)
-                    || !authors.insert(witness.authority)
+        let votes_valid = self.echo_votes.iter().all(|vote| {
+            let target = vote.target();
+            target.round > 0
+                && target.round <= block_round
+                && committee.known_authority(target.authority)
+                && committee.known_authority(vote.sender())
+        });
+        votes_valid
+            && self.echo_qcs.iter().all(|qc| {
+                let target = qc.target();
+                if target.round == 0
+                    || target.round >= block_round
+                    || !committee.known_authority(target.authority)
+                    || qc.signers().is_empty()
                 {
                     return false;
                 }
-                stake += committee.get_stake(witness.authority).unwrap_or_default();
-            }
-            committee.is_quorum(stake)
-        })
+                let mut stake = 0;
+                for sender in qc.signers().present() {
+                    if !committee.known_authority(sender) {
+                        return false;
+                    }
+                    stake += committee.get_stake(sender).unwrap_or_default();
+                }
+                committee.is_quorum(stake)
+            })
     }
 }
 

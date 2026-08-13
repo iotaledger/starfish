@@ -94,10 +94,9 @@ pub struct NodeParameters {
     /// Starfish finality proof shape.
     #[serde(default)]
     pub starfish_rbc_dag_vote_qc_fast_path: bool,
-    /// Testbed single-DAG RBC path: exact ordinary DAG blocks carrying ECHO
-    /// form a signature-free MAC-witness certificate. This is a latency lower
-    /// bound: a Byzantine witness can selectively corrupt another receiver's
-    /// MAC-vector entry, so strict ECHO->READY remains the totality-safe mode.
+    /// Testbed single-DAG RBC path: publicly signed ECHO votes are copied into
+    /// a portable quorum certificate carried by an ordinary DAG block. This
+    /// preserves uniqueness and totality without a standalone phase message.
     #[serde(default)]
     pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
     /// Benchmark-only profile that writes the framed shadow WAL in order but

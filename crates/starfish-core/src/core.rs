@@ -2,11 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt, mem,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, fmt, mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
@@ -43,8 +39,8 @@ use crate::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
         BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
         ProvableShard, ReconstructedTransactionData, RoundNumber, SailfishFields, Shard,
-        StarfishRbcEchoQcV3, StarfishRbcFieldsV3, StarfishRbcReferenceKindV3,
-        StarfishRbcReferenceV3, TimestampNs, VerifiedBlock,
+        StarfishRbcEchoQcV3, StarfishRbcEchoVoteV3, StarfishRbcFieldsV3, StarfishRbcReferenceV3,
+        VerifiedBlock,
     },
 };
 
@@ -62,12 +58,7 @@ pub struct Core<H: BlockHandler> {
     /// Irrevocable local ECHO/READY statements waiting to ride on the next
     /// ordinary block in the single-DAG protocol.
     pending_starfish_rbc_references: BTreeSet<StarfishRbcReferenceV3>,
-    /// Local enqueue timestamp for each pending signature-free ECHO/READY
-    /// statement. This is diagnostic-only and lets the benchmark distinguish
-    /// network quorum time from time spent waiting for the next ordinary DAG
-    /// block without adding protocol messages or changing block contents.
-    pending_starfish_rbc_reference_queued_at_ns:
-        BTreeMap<StarfishRbcReferenceV3, (TimestampNs, TimestampNs)>,
+    pending_starfish_rbc_echo_votes: BTreeSet<StarfishRbcEchoVoteV3>,
     pending_starfish_rbc_echo_qcs: BTreeSet<StarfishRbcEchoQcV3>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
@@ -335,7 +326,7 @@ impl<H: BlockHandler> Core<H> {
             pending,
             pending_reconstructed_data: AHashMap::new(),
             pending_starfish_rbc_references: BTreeSet::new(),
-            pending_starfish_rbc_reference_queued_at_ns: BTreeMap::new(),
+            pending_starfish_rbc_echo_votes: BTreeSet::new(),
             pending_starfish_rbc_echo_qcs: BTreeSet::new(),
             last_own_block: vec![last_own_block],
             block_handler,
@@ -376,35 +367,23 @@ impl<H: BlockHandler> Core<H> {
         &self.bls_signer
     }
 
-    pub(crate) fn add_starfish_rbc_reference(
-        &mut self,
-        reference: StarfishRbcReferenceV3,
-        target_creation_time_ns: Option<TimestampNs>,
-    ) {
+    pub(crate) fn add_starfish_rbc_reference(&mut self, reference: StarfishRbcReferenceV3) {
         assert!(
             self.dag_state
                 .consensus_protocol
                 .is_starfish_rbc_single_dag(),
             "embedded RBC references require single-DAG Starfish-RBC"
         );
-        if self.pending_starfish_rbc_references.insert(reference) {
-            if let Some(target_creation_time_ns) = target_creation_time_ns {
-                let now_ns = timestamp_utc()
-                    .as_nanos()
-                    .try_into()
-                    .unwrap_or(TimestampNs::MAX);
-                self.pending_starfish_rbc_reference_queued_at_ns
-                    .insert(reference, (now_ns, target_creation_time_ns));
-                self.metrics
-                    .observe_starfish_rbc_single_dag_phase_target_age_ns(
-                        match reference.kind() {
-                            StarfishRbcReferenceKindV3::Echo => "creation_to_echo_queued",
-                            StarfishRbcReferenceKindV3::Ready => "creation_to_ready_queued",
-                        },
-                        Some(now_ns.saturating_sub(target_creation_time_ns)),
-                    );
-            }
-        }
+        self.pending_starfish_rbc_references.insert(reference);
+    }
+
+    pub(crate) fn add_starfish_rbc_echo_vote(&mut self, vote: StarfishRbcEchoVoteV3) {
+        assert!(
+            self.dag_state
+                .consensus_protocol
+                .is_starfish_rbc_single_dag()
+        );
+        self.pending_starfish_rbc_echo_votes.insert(vote);
     }
 
     pub(crate) fn add_starfish_rbc_echo_qc(&mut self, qc: StarfishRbcEchoQcV3) {
@@ -895,9 +874,6 @@ impl<H: BlockHandler> Core<H> {
         };
         let single_dag_rbc = protocol.is_starfish_rbc_single_dag().then(|| {
             let maximum = self.committee.len().saturating_mul(6);
-            self.metrics.set_starfish_rbc_single_dag_pending_references(
-                self.pending_starfish_rbc_references.len(),
-            );
             let references: Vec<_> = self
                 .pending_starfish_rbc_references
                 .iter()
@@ -907,52 +883,28 @@ impl<H: BlockHandler> Core<H> {
                 .collect();
             for reference in &references {
                 self.pending_starfish_rbc_references.remove(reference);
-                let queued_timing = self
-                    .pending_starfish_rbc_reference_queued_at_ns
-                    .remove(reference);
-                if let Some((queued_at_ns, target_creation_ns)) = queued_timing {
-                    let now_ns = timestamp_utc()
-                        .as_nanos()
-                        .try_into()
-                        .unwrap_or(TimestampNs::MAX);
-                    self.metrics
-                        .observe_starfish_rbc_single_dag_phase_target_age_ns(
-                            match reference.kind() {
-                                StarfishRbcReferenceKindV3::Echo => "creation_to_echo_embedded",
-                                StarfishRbcReferenceKindV3::Ready => "creation_to_ready_embedded",
-                            },
-                            Some(now_ns.saturating_sub(target_creation_ns)),
-                        );
-                    self.metrics
-                        .observe_starfish_rbc_single_dag_phase_target_age_ns(
-                            match reference.kind() {
-                                StarfishRbcReferenceKindV3::Echo => "echo_queue_dwell",
-                                StarfishRbcReferenceKindV3::Ready => "ready_queue_dwell",
-                            },
-                            Some(now_ns.saturating_sub(queued_at_ns)),
-                        );
-                }
             }
-            self.metrics.set_starfish_rbc_single_dag_pending_references(
-                self.pending_starfish_rbc_references.len(),
-            );
+            let echo_votes: Vec<_> = self
+                .pending_starfish_rbc_echo_votes
+                .iter()
+                .filter(|vote| vote.target().round <= clock_round)
+                .take(self.committee.len().saturating_mul(3))
+                .copied()
+                .collect();
+            for vote in &echo_votes {
+                self.pending_starfish_rbc_echo_votes.remove(vote);
+            }
             let echo_qcs: Vec<_> = self
                 .pending_starfish_rbc_echo_qcs
                 .iter()
-                .filter(|qc| {
-                    qc.target().round < clock_round
-                        && qc
-                            .witnesses()
-                            .iter()
-                            .all(|witness| witness.round < clock_round)
-                })
+                .filter(|qc| qc.target().round < clock_round)
                 .take(self.committee.len())
                 .cloned()
                 .collect();
             for qc in &echo_qcs {
                 self.pending_starfish_rbc_echo_qcs.remove(qc);
             }
-            StarfishRbcFieldsV3::with_portable_echo(references, echo_qcs)
+            StarfishRbcFieldsV3::with_portable_echo(references, echo_votes, echo_qcs)
         });
 
         // Create and store blocks

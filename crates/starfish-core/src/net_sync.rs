@@ -43,7 +43,7 @@ use crate::{
     metrics::{
         Metrics, RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD,
         RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD, RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
-        UtilizationTimerVecExt, sample_starfish_rbc_single_dag_phase,
+        UtilizationTimerVecExt,
     },
     network::{BlockBatch, Connection, Network, NetworkMessage, RbcDagShadowCarrier, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
@@ -1732,15 +1732,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
             }
-            NetworkMessage::RbcHeaderEnvelopeResponse(proposal) => {
-                if let Some(ref rbc) = self.starfish_rbc_service {
-                    if let Err(error) = rbc.header_envelope_response(self.peer_id, proposal) {
-                        tracing::warn!(
-                            "Failed to forward Starfish-RBC authenticated header response: {error}"
-                        );
-                    }
-                }
-            }
             NetworkMessage::RbcDagShadowCarrier(envelope) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
                     if let Err(error) = shadow.carrier_reliably(self.peer_id, envelope).await {
@@ -3201,7 +3192,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     BlockAuthenticationScheme::MlDsa65 => {
                         RbcInitialAuthenticator::MlDsa65(core.get_ml_dsa_65_signer().clone())
                     }
-                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
+                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac(
+                        core.get_signer().clone(),
+                        core.get_bls_signer().clone(),
+                    ),
                 };
                 let (service, events, task) = start_starfish_rbc_service_with_phase_authority(
                     committee.clone(),
@@ -3548,17 +3542,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .await;
                         }
                         RbcServiceEvent::Delivered(header) => {
-                            if sample_starfish_rbc_single_dag_phase(header.reference()) {
-                                let now_ns = current_timestamp_ns();
-                                rbc_metrics.observe_starfish_rbc_single_dag_phase_target_age_ns(
-                                    "creation_to_delivery",
-                                    Some(
-                                        now_ns.saturating_sub(
-                                            header.header().meta_creation_time_ns(),
-                                        ),
-                                    ),
-                                );
-                            }
                             if let Some(ref shadow) =
                                 event_inner.starfish_rbc_dag_shadow_service
                             {
@@ -3582,16 +3565,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .apply_starfish_rbc_deliveries(vec![header])
                                 .await;
                         }
-                        RbcServiceEvent::ReferenceReady {
-                            reference,
-                            target_creation_time_ns,
-                        } => {
+                        RbcServiceEvent::ReferenceReady(reference) => {
                             event_inner
                                 .syncer
-                                .apply_starfish_rbc_reference(
-                                    reference,
-                                    target_creation_time_ns,
-                                )
+                                .apply_starfish_rbc_reference(reference)
+                                .await;
+                        }
+                        RbcServiceEvent::EchoVoteReady(vote) => {
+                            event_inner
+                                .syncer
+                                .apply_starfish_rbc_echo_vote(vote)
                                 .await;
                         }
                         RbcServiceEvent::EchoQcReady(qc) => {

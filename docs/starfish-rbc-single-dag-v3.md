@@ -37,8 +37,8 @@ is one of:
 The carrying block's authenticated author is the statement sender. The list is
 part of that ordinary block's content digest. Consequently the default path
 needs no standalone phase MAC, signature, or phase network message. The
-flagged MAC-witness experiment adds exact references to ECHO-carrying ordinary
-blocks, but still adds neither a signature nor a phase message.
+portable fast path adds embedded BLS ECHO votes and an aggregate QC, but still
+adds no phase message.
 
 References are sorted, duplicate-free and bounded by `6 * committee_size` per
 block. A sender may name at most one digest for each `(phase, target author,
@@ -92,26 +92,26 @@ create a second physical round counter.
 ### Portable ECHO-QC fast path
 
 Finite benchmarks may opt into
-`--starfish-rbc-single-dag-echo-qc-fast-path`. In that mode a certificate is the
-target plus a quorum of exact ordinary-block references whose authenticated
-headers contain `Echo(target)`. It contains no BLS, Ed25519, ML-DSA or other
-digital signature. The certificate rides in an ordinary DAG block; there is no
-standalone ECHO or READY message.
+`--starfish-rbc-single-dag-echo-qc-fast-path`. In that mode ECHO is a compact
+BLS vote over the exact target reference, protocol instance and committee.
+Votes ride in ordinary DAG blocks. Once quorum stake verifies, the node batch
+aggregates them into one portable certificate containing the target, signer
+bitmap and 48-byte aggregate signature. The QC also rides in an ordinary DAG
+block; there is no standalone ECHO or READY message.
 
-For synchronization, fast-path MAC proposals retain the author's complete MAC
-vector. A holder may relay the exact header and vector, and each receiver checks
-only its own pairwise entry before accepting that witness. Normal delivery adds
-no message; exact header/vector requests occur only when a named witness is
-missing.
+An honest node publishes or relays the QC before its delivery effect. The
+ordered Core bridge queues the QC-bearing block before applying delivery.
+Quorum intersection gives uniqueness, while public verification and mandatory
+relay remove the old receiver-local selective-withholding caveat: any valid QC
+that reaches one honest validator can be verified and propagated by every
+other validator. Missing target content still uses exact header recovery and
+delivery remains fail-closed until that content is present. Invalid aggregate
+batches fall back to individual vote verification so one Byzantine vote cannot
+poison an otherwise valid quorum.
 
-This flag is deliberately a **latency lower bound, not the Byzantine-totality
-mode**. A Byzantine witness author can make its vector valid for the first QC
-builder but invalid for another receiver. Requiring every named quorum witness
-therefore can prevent that receiver from accepting an otherwise observed QC;
-accepting fewer witnesses would instead lose quorum-intersection safety. Public
-signatures solve transferability but violate the signature-free requirement.
-The default quorum-ECHO then quorum-READY path remains the signature-free,
-totality-safe candidate.
+The flag remains testbed-only because bounded retirement, durable pending-QC
+replay and a complete asynchronous proof are still production follow-ups. The
+default V3 path continues to use the conventional quorum-READY rule.
 
 ## Required validation
 
@@ -133,16 +133,11 @@ with MAC authentication and the fixed 50 ms V3 round limiter:
 | `starfish-rbc-single-dag` | AWS table | 1,285.7 ms | 1,000 | 0.61 MB/s |
 | V3 + old receiver-local ECHO-QC | AWS table | 961.0 ms | 1,000 | 0.61 MB/s |
 | V3 + old receiver-local ECHO-QC, n=40 | AWS table | 977.35 ms | 1,000 | 3.04 MB/s |
-| V3 + rejected BLS aggregate ECHO-QC | zero | 405.8 ms | 1,000 | 1.06 MB/s |
-| V3 + rejected BLS aggregate ECHO-QC | AWS table | 983.7 ms | 1,000 | 0.74 MB/s |
-| V3 + signature-free MAC-witness ECHO-QC | zero | 397.1 ms | 1,000 | 1.38 MB/s |
-| V3 + signature-free MAC-witness ECHO-QC | AWS table | 955.3 ms | 1,000 | 0.91 MB/s |
+| V3 + portable aggregate ECHO-QC | zero | 405.8 ms | 1,000 | 1.06 MB/s |
+| V3 + portable aggregate ECHO-QC | AWS table | 983.7 ms | 1,000 | 0.74 MB/s |
 | `starfish-mac` lower bound | AWS table | 610.0 ms | 1,000 | 0.61 MB/s |
 
 All exact offered transactions committed during the bounded drain. These are
 single-machine research measurements, not production claims. The two old
-receiver-local rows preserve the historical totality caveat. The BLS rows are
-retained only as historical latency data and are not part of the signature-free
-design. The MAC-witness rows are also a flagged lower bound: unlike the strict
-default path, they assume every named witness supplied a valid complete MAC
-vector for every honest receiver.
+receiver-local rows preserve the historical totality caveat; the new portable
+rows use the signed aggregate certificate described above.

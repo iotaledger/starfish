@@ -295,10 +295,6 @@ pub enum NetworkMessage {
     /// authentication-sidecar variant. Appended after the frozen V1 message
     /// family so every preceding bincode enum discriminant remains stable.
     RbcDagShadowCarrierEnvelopeResponse(RbcDagShadowCarrierEnvelopeResponse),
-    /// Signature-free single-DAG recovery response carrying the exact header,
-    /// optional payload, and the author's complete MAC vector. Appended so
-    /// every preceding bincode discriminant remains stable.
-    RbcHeaderEnvelopeResponse(RbcHeaderProposal),
 }
 
 impl NetworkMessage {
@@ -336,7 +332,6 @@ impl NetworkMessage {
             Self::RbcDagShadowCarrierEnvelopeResponse(_) => {
                 "rbc_dag_shadow_carrier_envelope_response"
             }
-            Self::RbcHeaderEnvelopeResponse(_) => "rbc_header_envelope_response",
         }
     }
 }

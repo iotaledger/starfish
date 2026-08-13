@@ -326,19 +326,25 @@ impl BlockDigest {
         // Preserve the frozen V3 digest exactly when the portable extension
         // is absent. A non-empty extension is explicitly tagged before its
         // length-delimited fields, so old stored/default blocks still reopen.
-        if !rbc.echo_qcs().is_empty() {
-            hasher.update(b"PORTABLE_ECHO_WITNESS_QC_V1");
+        if !rbc.echo_votes().is_empty() || !rbc.echo_qcs().is_empty() {
+            hasher.update(b"PORTABLE_ECHO_QC_V1");
+            let vote_len = u32::try_from(rbc.echo_votes().len())
+                .expect("Starfish-RBC ECHO vote count exceeds u32");
+            hasher.update(&vote_len.to_be_bytes());
+            for vote in rbc.echo_votes() {
+                hash_reference(&mut hasher, &vote.target());
+                hasher.update(&vote.sender().to_be_bytes());
+                hasher.update(vote.signature().as_ref());
+            }
             let qc_len = u32::try_from(rbc.echo_qcs().len())
                 .expect("Starfish-RBC ECHO-QC count exceeds u32");
             hasher.update(&qc_len.to_be_bytes());
             for qc in rbc.echo_qcs() {
                 hash_reference(&mut hasher, &qc.target());
-                let witness_len = u32::try_from(qc.witnesses().len())
-                    .expect("Starfish-RBC ECHO-QC witness count exceeds u32");
-                hasher.update(&witness_len.to_be_bytes());
-                for witness in qc.witnesses() {
-                    hash_reference(&mut hasher, witness);
+                for word in qc.signers().words() {
+                    hasher.update(&word.to_be_bytes());
                 }
+                hasher.update(qc.signature().as_ref());
             }
         }
         Self(hasher.finalize().into())
@@ -1379,6 +1385,23 @@ pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
     // before reaching aggregation, so they are guaranteed to be in G1.
     let agg = bls::AggregateSignature::aggregate(&refs, false).expect("BLS aggregation");
     BlsSignatureBytes(agg.to_signature().to_bytes())
+}
+
+/// Fallible counterpart used on untrusted wire votes before they have been
+/// individually verified. The returned aggregate is still untrusted and must
+/// be verified against the exact signer set and message.
+pub fn bls_try_aggregate(sigs: &[&BlsSignatureBytes]) -> Option<BlsSignatureBytes> {
+    if sigs.is_empty() {
+        return None;
+    }
+    let parsed: Vec<bls::Signature> = sigs
+        .iter()
+        .map(|signature| bls::Signature::from_bytes(&signature.0))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let references: Vec<_> = parsed.iter().collect();
+    let aggregate = bls::AggregateSignature::aggregate(&references, true).ok()?;
+    Some(BlsSignatureBytes(aggregate.to_signature().to_bytes()))
 }
 
 /// Verify an aggregate signature against multiple public keys (all signed same

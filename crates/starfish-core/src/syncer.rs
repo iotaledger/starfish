@@ -30,7 +30,7 @@ use crate::{
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
         ReconstructedTransactionData, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
-        TimestampNs, VerifiedBlock,
+        VerifiedBlock,
     },
 };
 
@@ -405,10 +405,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn apply_starfish_rbc_reference(
         &mut self,
         reference: crate::types::StarfishRbcReferenceV3,
-        target_creation_time_ns: Option<TimestampNs>,
     ) {
-        self.core
-            .add_starfish_rbc_reference(reference, target_creation_time_ns);
+        self.core.add_starfish_rbc_reference(reference);
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+    }
+
+    pub fn apply_starfish_rbc_echo_vote(&mut self, vote: crate::types::StarfishRbcEchoVoteV3) {
+        self.core.add_starfish_rbc_echo_vote(vote);
         self.try_new_block(BlockCreationReason::CertificateEvent);
     }
 
