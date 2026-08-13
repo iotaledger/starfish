@@ -344,38 +344,10 @@ struct RbcCandidateState {
     votes: BTreeSet<AuthorityIndex>,
     acks: BTreeSet<AuthorityIndex>,
     readies: BTreeSet<AuthorityIndex>,
-    echo_stake: Stake,
-    vote_stake: Stake,
-    ack_stake: Stake,
-    ready_stake: Stake,
     requested_holders: BTreeSet<AuthorityIndex>,
 }
 
 impl RbcCandidateState {
-    fn insert_echo(&mut self, sender: AuthorityIndex, stake: Stake) {
-        if self.echoes.insert(sender) {
-            self.echo_stake = self.echo_stake.saturating_add(stake);
-        }
-    }
-
-    fn insert_vote(&mut self, sender: AuthorityIndex, stake: Stake) {
-        if self.votes.insert(sender) {
-            self.vote_stake = self.vote_stake.saturating_add(stake);
-        }
-    }
-
-    fn insert_ack(&mut self, sender: AuthorityIndex, stake: Stake) {
-        if self.acks.insert(sender) {
-            self.ack_stake = self.ack_stake.saturating_add(stake);
-        }
-    }
-
-    fn insert_ready(&mut self, sender: AuthorityIndex, stake: Stake) {
-        if self.readies.insert(sender) {
-            self.ready_stake = self.ready_stake.saturating_add(stake);
-        }
-    }
-
     fn holders(&self) -> BTreeSet<AuthorityIndex> {
         self.echoes
             .iter()
@@ -1280,7 +1252,6 @@ impl RbcDagModel {
 
     fn authorize_local_echo(&mut self, reference: BlockReference, log: &mut TransitionLog) {
         let own = self.own_authority;
-        let own_stake = self.authority_stake(own);
         if own == reference.authority {
             // The target author is excluded from ECHO/VOTE/ACK. A locally
             // fixed high-stake author instead seeds READY: its stake is at
@@ -1299,7 +1270,8 @@ impl RbcDagModel {
         slot.candidates
             .entry(reference)
             .or_default()
-            .insert_echo(own, own_stake);
+            .echoes
+            .insert(own);
         let statement = RbcPhaseStatementV1::Echo { target: reference };
         log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
         self.queue_local_phase(statement);
@@ -1308,7 +1280,6 @@ impl RbcDagModel {
 
     fn authorize_local_ready(&mut self, reference: BlockReference, log: &mut TransitionLog) {
         let own = self.own_authority;
-        let own_stake = self.authority_stake(own);
         let slot = self.rbc_slot_mut(reference);
         if slot.readied.is_some() {
             return;
@@ -1318,7 +1289,8 @@ impl RbcDagModel {
         slot.candidates
             .entry(reference)
             .or_default()
-            .insert_ready(own, own_stake);
+            .readies
+            .insert(own);
         let statement = RbcPhaseStatementV1::Ready { target: reference };
         log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
         self.queue_local_phase(statement);
@@ -1434,7 +1406,6 @@ impl RbcDagModel {
                 return;
             }
         }
-        let sender_stake = self.authority_stake(sender);
         let slot = self.rbc_slot_mut(target);
         let senders = match statement {
             RbcPhaseStatementV1::Echo { .. } => &mut slot.echo_by_sender,
@@ -1452,16 +1423,16 @@ impl RbcDagModel {
         let candidate = slot.candidates.entry(target).or_default();
         match statement {
             RbcPhaseStatementV1::Echo { .. } => {
-                candidate.insert_echo(sender, sender_stake);
+                candidate.echoes.insert(sender);
             }
             RbcPhaseStatementV1::Vote { .. } => {
-                candidate.insert_vote(sender, sender_stake);
+                candidate.votes.insert(sender);
             }
             RbcPhaseStatementV1::Ack { .. } => {
-                candidate.insert_ack(sender, sender_stake);
+                candidate.acks.insert(sender);
             }
             RbcPhaseStatementV1::Ready { .. } => {
-                candidate.insert_ready(sender, sender_stake);
+                candidate.readies.insert(sender);
             }
         }
         self.drive_rbc(target, log);
@@ -1537,24 +1508,11 @@ impl RbcDagModel {
                     .get(&slot_key)
                     .and_then(|slot| slot.candidates.get(&target))
                     .expect("the candidate remains allocated");
-                debug_assert_eq!(
-                    candidate.echo_stake,
-                    self.voters_stake_excluding(&candidate.echoes, target.authority)
-                );
-                debug_assert_eq!(
-                    candidate.vote_stake,
-                    self.voters_stake_excluding(&candidate.votes, target.authority)
-                );
-                debug_assert_eq!(
-                    candidate.ack_stake,
-                    self.voters_stake_excluding(&candidate.acks, target.authority)
-                );
-                debug_assert_eq!(candidate.ready_stake, self.voters_stake(&candidate.readies));
                 (
-                    candidate.echo_stake,
-                    candidate.vote_stake,
-                    candidate.ack_stake,
-                    candidate.ready_stake,
+                    self.voters_stake_excluding(&candidate.echoes, target.authority),
+                    self.voters_stake_excluding(&candidate.votes, target.authority),
+                    self.voters_stake_excluding(&candidate.acks, target.authority),
+                    self.voters_stake(&candidate.readies),
                 )
             };
             let (vote_trigger, ack_trigger, optimistic_ready_trigger, promise_trigger) = thresholds
@@ -1632,28 +1590,20 @@ impl RbcDagModel {
                 }
                 RbcAction::SendVote => {
                     let own = self.own_authority;
-                    let own_stake = self.authority_stake(own);
                     let slot = self.rbc_slot_mut(target);
                     slot.voted = Some(target);
                     slot.vote_by_sender.insert(own, target);
-                    slot.candidates
-                        .entry(target)
-                        .or_default()
-                        .insert_vote(own, own_stake);
+                    slot.candidates.entry(target).or_default().votes.insert(own);
                     let statement = RbcPhaseStatementV1::Vote { target };
                     log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
                     self.queue_local_phase(statement);
                 }
                 RbcAction::SendAck => {
                     let own = self.own_authority;
-                    let own_stake = self.authority_stake(own);
                     let slot = self.rbc_slot_mut(target);
                     slot.acked = Some(target);
                     slot.ack_by_sender.insert(own, target);
-                    slot.candidates
-                        .entry(target)
-                        .or_default()
-                        .insert_ack(own, own_stake);
+                    slot.candidates.entry(target).or_default().acks.insert(own);
                     let statement = RbcPhaseStatementV1::Ack { target };
                     log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
                     self.queue_local_phase(statement);
@@ -3506,8 +3456,7 @@ mod tests {
                 .carriers
                 .insert(reference, CarrierRecord::new(carrier, false));
             let mut candidate_state = RbcCandidateState::default();
-            candidate_state.insert_ready(1, 1);
-            candidate_state.insert_ready(2, 1);
+            candidate_state.readies.extend([1, 2]);
             let mut slot = RbcSlotState::default();
             slot.ready_by_sender
                 .extend([(1, reference), (2, reference)]);

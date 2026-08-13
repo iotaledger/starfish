@@ -205,11 +205,6 @@ enum Operation {
         /// headers. Requires the autonomous RBC-DAG mode.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_embedded_rbc_authority: bool,
-        /// Testbed-only: directly commit a projected leader after its exact
-        /// projected vote quorum, skipping the strict second certifier wave.
-        /// Requires embedded RBC-DAG authority and changes the finality proof.
-        #[clap(long, default_value_t = false)]
-        starfish_rbc_dag_vote_qc_fast_path: bool,
         /// Testbed-only: deliver a single-DAG RBC header after a receiver-local
         /// quorum ECHO. This preserves uniqueness but not Byzantine
         /// selective-withholding totality, so it is restricted to finite
@@ -342,7 +337,6 @@ async fn main() -> Result<()> {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
-            starfish_rbc_dag_vote_qc_fast_path,
             starfish_rbc_single_dag_echo_qc_fast_path,
             starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
@@ -361,7 +355,6 @@ async fn main() -> Result<()> {
             node_parameters.starfish_rbc_dag_autonomous_clock = starfish_rbc_dag_autonomous_clock;
             node_parameters.starfish_rbc_dag_embedded_rbc_authority =
                 starfish_rbc_dag_embedded_rbc_authority;
-            node_parameters.starfish_rbc_dag_vote_qc_fast_path = starfish_rbc_dag_vote_qc_fast_path;
             node_parameters.starfish_rbc_single_dag_echo_qc_fast_path =
                 starfish_rbc_single_dag_echo_qc_fast_path;
             node_parameters.starfish_rbc_dag_consensus_timeout =
@@ -605,14 +598,6 @@ async fn local_benchmark(
                 .starfish_rbc_dag_consensus_timeout
                 .unwrap_or(node_parameters.leader_timeout)
                 .as_millis()
-        );
-        println!(
-            "Vote-QC direct commit: {}",
-            if node_parameters.starfish_rbc_dag_vote_qc_fast_path {
-                "ENABLED (testbed-only; strict certifier wave skipped)"
-            } else {
-                "disabled (strict two-level Starfish finality)"
-            }
         );
     }
     if node_parameters.starfish_rbc_single_dag_echo_qc_fast_path {
@@ -1558,7 +1543,6 @@ mod tests {
             "--starfish-rbc-dag-shadow",
             "--starfish-rbc-dag-autonomous-clock",
             "--starfish-rbc-dag-embedded-rbc-authority",
-            "--starfish-rbc-dag-vote-qc-fast-path",
             "--starfish-rbc-single-dag-echo-qc-fast-path",
             "--starfish-rbc-dag-consensus-timeout-ms",
             "250",
@@ -1574,7 +1558,6 @@ mod tests {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
-            starfish_rbc_dag_vote_qc_fast_path,
             starfish_rbc_single_dag_echo_qc_fast_path,
             starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
@@ -1589,7 +1572,6 @@ mod tests {
         assert!(starfish_rbc_dag_shadow);
         assert!(starfish_rbc_dag_autonomous_clock);
         assert!(starfish_rbc_dag_embedded_rbc_authority);
-        assert!(starfish_rbc_dag_vote_qc_fast_path);
         assert!(starfish_rbc_single_dag_echo_qc_fast_path);
         assert_eq!(starfish_rbc_dag_consensus_timeout_ms, Some(250));
         assert!(starfish_rbc_dag_shadow_buffered_wal);

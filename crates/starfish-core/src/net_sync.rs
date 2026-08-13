@@ -45,7 +45,7 @@ use crate::{
         RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD, RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
         UtilizationTimerVecExt,
     },
-    network::{BlockBatch, Connection, Network, NetworkMessage, RbcDagShadowCarrier, ShardPayload},
+    network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
     sailfish_service::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
@@ -350,32 +350,21 @@ impl RbcDagOutboundMailboxV1 {
         }
     }
 
-    #[cfg(test)]
     fn enqueue(
         &self,
         message: NetworkMessage,
-        committee: &RbcDagCommitteeContextV1,
-    ) -> Result<RbcDagOutboundEnqueueV1, RbcDagOutboundMailboxErrorV1> {
-        self.enqueue_with_proactive_reference(message, committee, None)
-    }
-
-    fn enqueue_with_proactive_reference(
-        &self,
-        message: NetworkMessage,
-        committee: &RbcDagCommitteeContextV1,
-        proactive_reference: Option<BlockReference>,
+        committee: &Committee,
     ) -> Result<RbcDagOutboundEnqueueV1, RbcDagOutboundMailboxErrorV1> {
         if let Some(reason) = self.inner.state.lock().failure.clone() {
             return Err(RbcDagOutboundMailboxErrorV1::Failed(reason));
         }
-        let (class, key) =
-            match rbc_dag_outbound_classification(&message, committee, proactive_reference) {
-                Ok(classification) => classification,
-                Err(error) => {
-                    self.fail(&error);
-                    return Err(error);
-                }
-            };
+        let (class, key) = match rbc_dag_outbound_classification(&message, committee) {
+            Ok(classification) => classification,
+            Err(error) => {
+                self.fail(&error);
+                return Err(error);
+            }
+        };
         let framed_bytes = match bincode::serialized_size(&message)
             .map_err(|error| RbcDagOutboundMailboxErrorV1::Serialization(error.to_string()))
             .and_then(|size| {
@@ -463,19 +452,27 @@ impl RbcDagOutboundMailboxV1 {
 
 fn rbc_dag_outbound_classification(
     message: &NetworkMessage,
-    committee: &RbcDagCommitteeContextV1,
-    proactive_reference: Option<BlockReference>,
+    committee: &Committee,
 ) -> Result<(RbcDagOutboundClassV1, RbcDagOutboundKeyV1), RbcDagOutboundMailboxErrorV1> {
     let priority = RbcDagOutboundClassV1::Priority;
     match message {
         NetworkMessage::RbcDagShadowCarrier(carrier) => {
-            let reference = match proactive_reference {
-                Some(reference) => reference,
-                None => rbc_dag_proactive_reference(carrier, committee)?,
-            };
+            let candidate =
+                CandidateCarrierV1::decode_wire(&carrier.canonical_carrier, committee, None)
+                    .map_err(|error| {
+                        RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string())
+                    })?;
+            let canonical = candidate.canonical_wire_bytes().map_err(|error| {
+                RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string())
+            })?;
+            if canonical != carrier.canonical_carrier {
+                return Err(RbcDagOutboundMailboxErrorV1::InvalidProactive(
+                    "non-canonical carrier wire".to_owned(),
+                ));
+            }
             Ok((
                 RbcDagOutboundClassV1::Proactive,
-                RbcDagOutboundKeyV1::Proactive(reference),
+                RbcDagOutboundKeyV1::Proactive(candidate.reference()),
             ))
         }
         NetworkMessage::RbcDagShadowCarrierRequest(reference) => {
@@ -507,24 +504,6 @@ fn rbc_dag_outbound_classification(
         )),
         _ => Err(RbcDagOutboundMailboxErrorV1::Unsupported),
     }
-}
-
-fn rbc_dag_proactive_reference(
-    carrier: &RbcDagShadowCarrier,
-    committee: &RbcDagCommitteeContextV1,
-) -> Result<BlockReference, RbcDagOutboundMailboxErrorV1> {
-    let candidate =
-        CandidateCarrierV1::decode_wire_with_committee(&carrier.canonical_carrier, committee, None)
-            .map_err(|error| RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string()))?;
-    let canonical = candidate
-        .canonical_wire_bytes()
-        .map_err(|error| RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string()))?;
-    if canonical != carrier.canonical_carrier {
-        return Err(RbcDagOutboundMailboxErrorV1::InvalidProactive(
-            "non-canonical carrier wire".to_owned(),
-        ));
-    }
-    Ok(candidate.reference())
 }
 
 fn rbc_dag_outbound_messages_equal(left: &NetworkMessage, right: &NetworkMessage) -> bool {
@@ -3217,10 +3196,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             } else {
                 (None, None, None)
             };
-        let rbc_dag_committee_context = recovered_shadow_local_headers.as_ref().map(|_| {
-            RbcDagCommitteeContextV1::new(committee.clone())
-                .expect("validated committee must initialize the RBC-DAG shadow")
-        });
         let (starfish_rbc_dag_shadow_service, rbc_dag_shadow_event_rx, rbc_dag_shadow_service_task) =
             if let Some(recovered_local_headers) = recovered_shadow_local_headers {
                 let protocol_instance_bytes = node_parameters
@@ -3230,9 +3205,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     protocol_instance_bytes,
                     node_parameters.starfish_rbc_dag_autonomous_clock,
                 );
-                let committee_context = rbc_dag_committee_context
-                    .clone()
-                    .expect("RBC-DAG runtime must retain its validated committee context");
+                let committee_context = RbcDagCommitteeContextV1::new(committee.clone())
+                    .expect("validated committee must initialize the RBC-DAG shadow");
                 let context = RbcDagContextV1::new_with_committee(
                     protocol_instance,
                     &committee_context,
@@ -3287,7 +3261,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             Arc::clone(&metrics),
                             rbc_dag_frontier_recovery_cursor,
                             !rbc_dag_clock_start_paused,
-                            node_parameters.starfish_rbc_dag_vote_qc_fast_path,
                         )
                     } else {
                         let start = if rbc_dag_clock_start_paused {
@@ -3657,20 +3630,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
         let rbc_dag_shadow_event_task = rbc_dag_shadow_event_rx.map(|mut event_rx| {
             let event_inner = inner.clone();
-            let rbc_dag_committee_context = rbc_dag_committee_context
-                .clone()
-                .expect("RBC-DAG event router must retain its validated committee context");
             let shadow_metrics = metrics.clone();
             let rbc_dag_clock_bridge_tx = rbc_dag_clock_bridge_tx.clone();
             let rbc_dag_core_control_tx = rbc_dag_core_control_tx;
             let rbc_dag_assignment_tx = rbc_dag_assignment_tx;
             let rbc_dag_shutdown_started = rbc_dag_shutdown_started;
             handle.spawn(async move {
-                // A local broadcast emits the same canonical carrier once per
-                // recipient. Validate it on the first event and reuse only its
-                // exact reference while the bytes remain identical; receiver
-                // authentication and canonical decoding are unchanged.
-                let mut last_proactive_carrier: Option<(Vec<u8>, BlockReference)> = None;
                 let mut router_guard = embedded_rbc_authority.then(|| {
                     RbcDagEventRouterGuardV1::new(
                         shadow_metrics.clone(),
@@ -3699,49 +3664,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .get(&recipient)
                                 .cloned();
                             if let Some(mailbox) = mailbox {
-                                let proactive_reference = match &message {
-                                    NetworkMessage::RbcDagShadowCarrier(carrier) => {
-                                        if let Some(reference) = last_proactive_carrier
-                                            .as_ref()
-                                            .filter(|(canonical, _)| {
-                                                canonical == &carrier.canonical_carrier
-                                            })
-                                            .map(|(_, reference)| *reference)
-                                        {
-                                            Some(reference)
-                                        } else {
-                                            match rbc_dag_proactive_reference(
-                                                carrier,
-                                                &rbc_dag_committee_context,
-                                            ) {
-                                                Ok(reference) => {
-                                                    last_proactive_carrier = Some((
-                                                        carrier.canonical_carrier.clone(),
-                                                        reference,
-                                                    ));
-                                                    Some(reference)
-                                                }
-                                                Err(error) => {
-                                                    mailbox.fail(&error);
-                                                    fail_rbc_dag_outbound_transport(
-                                                        &shadow_metrics,
-                                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                                        embedded_rbc_authority,
-                                                        recipient,
-                                                        &error,
-                                                    );
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => None,
-                                };
-                                match mailbox.enqueue_with_proactive_reference(
-                                    message,
-                                    &rbc_dag_committee_context,
-                                    proactive_reference,
-                                ) {
+                                match mailbox.enqueue(message, &event_inner.committee) {
                                     Ok(RbcDagOutboundEnqueueV1::Added) => shadow_metrics
                                         .starfish_rbc_dag_shadow_inputs_total
                                         .with_label_values(&["network", "sent"])
@@ -5580,31 +5503,21 @@ mod tests {
     #[test]
     fn rbc_dag_outbound_mailbox_coalesces_exact_duplicates_and_rejects_conflicts() {
         let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(committee).unwrap();
         let mailbox = RbcDagOutboundMailboxV1::new();
         assert_eq!(
             mailbox
-                .enqueue(
-                    rbc_dag_outbound_test_sync_response(7, 0xA1),
-                    &committee_context,
-                )
+                .enqueue(rbc_dag_outbound_test_sync_response(7, 0xA1), &committee)
                 .unwrap(),
             RbcDagOutboundEnqueueV1::Added
         );
         assert_eq!(
             mailbox
-                .enqueue(
-                    rbc_dag_outbound_test_sync_response(7, 0xA1),
-                    &committee_context,
-                )
+                .enqueue(rbc_dag_outbound_test_sync_response(7, 0xA1), &committee)
                 .unwrap(),
             RbcDagOutboundEnqueueV1::Coalesced
         );
         assert!(matches!(
-            mailbox.enqueue(
-                rbc_dag_outbound_test_sync_response(7, 0xB1),
-                &committee_context,
-            ),
+            mailbox.enqueue(rbc_dag_outbound_test_sync_response(7, 0xB1), &committee),
             Err(RbcDagOutboundMailboxErrorV1::ConflictingDuplicate {
                 class: RbcDagOutboundClassV1::Priority,
                 key: RbcDagOutboundKeyV1::SyncResponse(1, 7),
@@ -5618,12 +5531,11 @@ mod tests {
     #[test]
     fn rbc_dag_outbound_mailbox_drains_priority_before_proactive() {
         let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(committee.clone()).unwrap();
         let mailbox = RbcDagOutboundMailboxV1::new();
         let (reference, proactive) = rbc_dag_outbound_test_carrier(&committee, 11);
-        mailbox.enqueue(proactive, &committee_context).unwrap();
+        mailbox.enqueue(proactive, &committee).unwrap();
         mailbox
-            .enqueue(rbc_dag_outbound_test_sync_request(9), &committee_context)
+            .enqueue(rbc_dag_outbound_test_sync_request(9), &committee)
             .unwrap();
 
         let (class, first) = mailbox.try_pop().unwrap();
@@ -5638,9 +5550,7 @@ mod tests {
         let (class, second) = mailbox.try_pop().unwrap();
         assert_eq!(class, RbcDagOutboundClassV1::Proactive);
         assert!(matches!(
-            rbc_dag_outbound_classification(&second, &committee_context, None)
-                .unwrap()
-                .1,
+            rbc_dag_outbound_classification(&second, &committee).unwrap().1,
             RbcDagOutboundKeyV1::Proactive(actual) if actual == reference
         ));
     }
@@ -5648,7 +5558,6 @@ mod tests {
     #[test]
     fn rbc_dag_outbound_mailbox_never_evicts_a_unique_proactive_reference() {
         let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(committee.clone()).unwrap();
         let mailbox = RbcDagOutboundMailboxV1::new();
         let mut first_reference = None;
         for marker in 1..=STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY {
@@ -5656,7 +5565,7 @@ mod tests {
                 rbc_dag_outbound_test_carrier(&committee, marker as TimestampNs);
             first_reference.get_or_insert(reference);
             assert_eq!(
-                mailbox.enqueue(message, &committee_context).unwrap(),
+                mailbox.enqueue(message, &committee).unwrap(),
                 RbcDagOutboundEnqueueV1::Added
             );
         }
@@ -5665,7 +5574,7 @@ mod tests {
             STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as TimestampNs + 1,
         );
         assert!(matches!(
-            mailbox.enqueue(overflow, &committee_context),
+            mailbox.enqueue(overflow, &committee),
             Err(RbcDagOutboundMailboxErrorV1::KeyCapacity {
                 class: RbcDagOutboundClassV1::Proactive,
                 capacity: STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
@@ -5687,14 +5596,10 @@ mod tests {
     #[test]
     fn rbc_dag_outbound_mailbox_bounds_distinct_priority_keys_and_bytes() {
         let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(committee).unwrap();
         let mailbox = RbcDagOutboundMailboxV1::new();
         for round in 1..=STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as RoundNumber {
             mailbox
-                .enqueue(
-                    rbc_dag_outbound_test_sync_request(round),
-                    &committee_context,
-                )
+                .enqueue(rbc_dag_outbound_test_sync_request(round), &committee)
                 .unwrap();
         }
         assert!(matches!(
@@ -5702,7 +5607,7 @@ mod tests {
                 rbc_dag_outbound_test_sync_request(
                     STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as RoundNumber + 1,
                 ),
-                &committee_context,
+                &committee,
             ),
             Err(RbcDagOutboundMailboxErrorV1::KeyCapacity {
                 class: RbcDagOutboundClassV1::Priority,
@@ -5732,9 +5637,9 @@ mod tests {
             ),
             failure: None,
         });
-        byte_bounded.enqueue(first, &committee_context).unwrap();
+        byte_bounded.enqueue(first, &committee).unwrap();
         assert!(matches!(
-            byte_bounded.enqueue(rbc_dag_outbound_test_sync_request(2), &committee_context,),
+            byte_bounded.enqueue(rbc_dag_outbound_test_sync_request(2), &committee),
             Err(RbcDagOutboundMailboxErrorV1::ByteCapacity {
                 class: RbcDagOutboundClassV1::Priority,
                 ..

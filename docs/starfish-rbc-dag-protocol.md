@@ -720,13 +720,6 @@ The existing Starfish patterns are then evaluated from these explicit choices:
 - `Q` distinct certifier authors provide the direct-commit condition; and
 - a per-candidate quorum of explicit negative choices provides the direct-skip pattern.
 
-This two-level rule is the strict default. The local testbed can explicitly enable
-`--starfish-rbc-dag-vote-qc-fast-path`, which directly commits an exact projected leader after the
-preceding projected vote quorum and therefore skips the second certifier wave. The experiment adds
-no wire messages, retains the ordinary skip and indirect-recovery paths, and is intentionally
-labelled separately because it changes the proof shape described by this section; it is not a
-production-finality claim.
-
 If the leader produces no value, `Q` immutable `NoVote(slot)` choices are a self-contained direct
 skip witness. If a Byzantine leader equivocates, `Vote(L)` is negative evidence for every other
 candidate, and the current Starfish per-candidate evaluator decides whether the collected explicit
@@ -884,12 +877,12 @@ newest current-process observation (`<= 4`). These are empirical benchmark cover
 asynchronous protocol bounds; a run exceeding either guard is discarded rather than treated as
 proof of a protocol failure.
 
-The actor reserves a bounded queue of up to 128 entries so several fan-in bursts can wait behind a slow
+The actor reserves the full hard 64-entry queue so several fan-in bursts can wait behind a slow
 reference transition (including synchronous fsync in the crash-safe profile), capping queued
-maximum-sized carrier bodies at 512 MiB (plus sidecars and allocator overhead). Mirror mode budgets
+maximum-sized carrier bodies at 256 MiB (plus sidecars and allocator overhead). Mirror mode budgets
 one peer fan-in plus five local/control inputs and accepts
-at most 124 validators. Autonomous mode budgets a simultaneous carrier, exact-slot request, and
-exact-slot response per peer plus five control inputs and accepts at most 42 validators. Larger runs
+at most 60 validators. Autonomous mode budgets a simultaneous carrier, exact-slot request, and
+exact-slot response per peer plus five control inputs and accepts at most 20 validators. Larger runs
 are rejected rather than silently producing incomplete evidence. Timer notifications are coalesced,
 healthy proactive rounds receive a repair grace period, and exact synchronization is rate-limited
 per peer. Exact synchronization transfers only one requested `(author, round)` and only from the

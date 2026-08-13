@@ -26,9 +26,8 @@ use crate::{
         RbcPhaseStatementV1, carrier_genesis_reference,
         journal::{IngressProvenanceV1, JournalErrorV1, JournalEventV1, WriteAheadJournalV1},
         model::{
-            DeliveryPromiseBasisV1, EXECUTABLE_MODEL_ADMISSION_WINDOW_V1,
-            EXECUTABLE_MODEL_BUFFER_WINDOW_V1, ModelEffect, ModelError, ModelInputRecord,
-            ModelTraceEvent, RbcDagModel,
+            DeliveryPromiseBasisV1, EXECUTABLE_MODEL_BUFFER_WINDOW_V1, ModelEffect, ModelError,
+            ModelInputRecord, ModelTraceEvent, RbcDagModel,
         },
         projection::{
             C1StrongParentWitnessV1, CertifiedProjectionError, CertifiedProjectionModel,
@@ -744,7 +743,6 @@ pub(crate) struct StarfishRbcDagShadowV1 {
     pending_projected_vertices: Vec<ConsensusVertexReference>,
     pending_projection_decisions: Vec<ProjectionDecisionV1>,
     pending_committed_frontiers: Vec<CommittedFrontierDeltaV1>,
-    vote_qc_fast_path: bool,
     poisoned: bool,
 }
 
@@ -792,7 +790,6 @@ impl StarfishRbcDagShadowV1 {
             authorizer,
             wal_sync_policy,
             ShadowFrontierRecoveryPolicyV1::Observational,
-            false,
         )
     }
 
@@ -808,7 +805,6 @@ impl StarfishRbcDagShadowV1 {
         authorizer: ShadowAuthorizerV1,
         wal_sync_policy: ShadowWalSyncPolicyV1,
         recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
-        vote_qc_fast_path: bool,
     ) -> Result<(Self, ShadowOpenReportV1), ShadowErrorV1> {
         Self::open_with_frontier_recovery_policy(
             path,
@@ -818,7 +814,6 @@ impl StarfishRbcDagShadowV1 {
             authorizer,
             wal_sync_policy,
             ShadowFrontierRecoveryPolicyV1::Authoritative(recovery_cursor),
-            vote_qc_fast_path,
         )
     }
 
@@ -831,7 +826,6 @@ impl StarfishRbcDagShadowV1 {
         authorizer: ShadowAuthorizerV1,
         wal_sync_policy: ShadowWalSyncPolicyV1,
         frontier_recovery_policy: ShadowFrontierRecoveryPolicyV1,
-        vote_qc_fast_path: bool,
     ) -> Result<(Self, ShadowOpenReportV1), ShadowErrorV1> {
         validate_configuration(&committee, own_authority, context, &authorizer)?;
         let committee_size = committee.committee().len();
@@ -880,7 +874,6 @@ impl StarfishRbcDagShadowV1 {
             pending_projected_vertices: Vec::new(),
             pending_projection_decisions: Vec::new(),
             pending_committed_frontiers: Vec::new(),
-            vote_qc_fast_path,
             poisoned: false,
         };
 
@@ -998,34 +991,12 @@ impl StarfishRbcDagShadowV1 {
     /// window. These are bounded by the reducer's future-carrier window and
     /// become admitted only through sequential clock advancement.
     pub(crate) fn buffered_authenticated_carrier_count(&self) -> usize {
-        let Some(first_buffered_round) = self
-            .local_carrier_round()
-            .checked_add(EXECUTABLE_MODEL_ADMISSION_WINDOW_V1)
-            .and_then(|round| round.checked_add(1))
-        else {
-            return 0;
-        };
-        let buffered = self
-            .committee
-            .committee()
-            .authorities()
-            .map(|authority| {
-                self.authenticated_slots
-                    .range((authority, first_buffered_round)..=(authority, RoundNumber::MAX))
-                    .count()
+        self.authenticated_slots
+            .iter()
+            .filter(|((authority, round), reference)| {
+                self.model.admitted_reference(*authority, *round) != Some(**reference)
             })
-            .sum();
-        debug_assert_eq!(
-            buffered,
-            self.authenticated_slots
-                .iter()
-                .filter(|((authority, round), reference)| {
-                    self.model.admitted_reference(*authority, *round) != Some(**reference)
-                })
-                .count(),
-            "the reducer must admit every authenticated carrier inside its admission window"
-        );
-        buffered
+            .count()
     }
 
     pub(crate) fn drain_projection_decisions(&mut self) -> Vec<ProjectionDecisionV1> {
@@ -2058,39 +2029,6 @@ impl StarfishRbcDagShadowV1 {
         Ok(())
     }
 
-    /// Commit the longest consecutive prefix backed by an exact projected
-    /// vote quorum. Two conflicting vote quorums, or a vote quorum and a
-    /// negative-choice skip quorum, intersect in honest stake; an honest
-    /// logical author fixes exactly one choice. Reliable projected delivery
-    /// then makes the certificate eventually visible to every honest node.
-    /// This removes the redundant second certificate wave from the optimistic
-    /// direct-commit path while leaving skip and indirect recovery unchanged.
-    fn drive_vote_quorum_committer(&mut self) -> Result<(), ShadowErrorV1> {
-        loop {
-            let slot = self
-                .projection
-                .leader_slot(self.next_undecided_consensus_round);
-            let mut certified = Vec::new();
-            for leader in self.projection.leader_values(slot) {
-                if self.projection.vote_stake(leader)?
-                    >= self.committee.committee().quorum_threshold()
-                {
-                    certified.push(leader);
-                }
-            }
-            if certified.len() > 1 {
-                return Err(CertifiedProjectionError::MultipleCertifiedLeaderValues(slot).into());
-            }
-            let Some(leader) = certified.pop() else {
-                return Ok(());
-            };
-            let decision = ProjectionDecisionV1::DirectCommit { leader };
-            self.commit_projected_anchor(leader)?;
-            self.record_projection_decision(decision);
-            self.next_undecided_consensus_round = slot.round.saturating_add(1);
-        }
-    }
-
     fn record_projection_decision(&mut self, decision: ProjectionDecisionV1) {
         if self.projected_decisions.insert(decision) {
             let slot = projection_decision_slot(decision);
@@ -2422,11 +2360,7 @@ impl StarfishRbcDagShadowV1 {
         }
         self.activate_promised_references();
         self.drive_promised_projection();
-        self.drive_certified_projection()?;
-        if self.vote_qc_fast_path {
-            self.drive_vote_quorum_committer()?;
-        }
-        Ok(())
+        self.drive_certified_projection()
     }
 
     fn decode_batch(&self, records: &[Vec<u8>]) -> Result<ShadowInputV1, ShadowErrorV1> {
@@ -3861,45 +3795,6 @@ mod tests {
             );
         }
         [older, first_anchor, later_anchor]
-    }
-
-    #[test]
-    fn vote_quorum_commits_before_the_certifier_round_projects() {
-        let mut network = TestNetwork::new();
-        let node = &mut network.nodes[0];
-        assert!(!node.vote_qc_fast_path, "strict finality is the default");
-        node.vote_qc_fast_path = true;
-        let leader_author = node.committee.committee().elect_leader(1);
-        let leader = ordered_committer_vertex(leader_author, 1, 0);
-        node.projection.inject_projected_for_test(
-            leader,
-            Vec::new(),
-            LeaderChoiceV1::NoVote {
-                leader_author,
-                leader_round: 0,
-            },
-        );
-        for author in 0..3 as AuthorityIndex {
-            node.projection.inject_projected_for_test(
-                ordered_committer_vertex(author, 2, 0),
-                vec![leader],
-                LeaderChoiceV1::Vote { leader },
-            );
-        }
-
-        let slot = node.projection.leader_slot(1);
-        assert_eq!(
-            node.projection.direct_decision(slot).unwrap(),
-            ProjectionDecisionV1::Undecided { slot },
-            "the legacy two-level rule still waits for round-three certifiers"
-        );
-        node.drive_vote_quorum_committer().unwrap();
-        assert_eq!(
-            node.drain_projection_decisions(),
-            vec![ProjectionDecisionV1::DirectCommit { leader }]
-        );
-        assert_eq!(node.drain_committed_frontiers().len(), 1);
-        assert_eq!(node.next_undecided_consensus_round, 2);
     }
 
     #[test]

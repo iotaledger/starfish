@@ -134,22 +134,6 @@ impl Validator {
                 "Starfish-RBC-DAG embedded RBC authority requires the autonomous RBC-DAG shadow"
             ));
         }
-        if public_config.parameters.starfish_rbc_dag_vote_qc_fast_path
-            && !public_config
-                .parameters
-                .starfish_rbc_dag_embedded_rbc_authority
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG vote-QC fast path requires embedded RBC-DAG authority"
-            ));
-        }
-        if public_config.parameters.starfish_rbc_dag_vote_qc_fast_path
-            && parameters.benchmark_duration.is_none()
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG vote-QC fast path is restricted to finite testbed benchmarks"
-            ));
-        }
         if public_config
             .parameters
             .starfish_rbc_single_dag_echo_qc_fast_path
@@ -169,7 +153,7 @@ impl Validator {
         {
             return Err(eyre!(
                 "Starfish-RBC single-DAG ECHO-QC fast path is restricted to finite testbed \
-                 benchmarks"
+                benchmarks"
             ));
         }
         if public_config.parameters.starfish_rbc_dag_autonomous_clock && !is_starfish_rbc {
@@ -590,67 +574,6 @@ mod smoke_tests {
             error
                 .to_string()
                 .contains("logical consensus timeout requires the autonomous clock")
-        }));
-    }
-
-    #[tokio::test]
-    async fn vote_qc_fast_path_requires_embedded_authority() {
-        let committee_size = 4;
-        let committee = Committee::new_for_benchmarks(committee_size);
-        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
-        public_config.parameters.starfish_rbc_dag_vote_qc_fast_path = true;
-        let private_config =
-            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
-                .remove(0);
-
-        let result = Validator::start(
-            0,
-            committee,
-            public_config,
-            private_config,
-            Parameters::default(),
-            "honest".to_string(),
-            "starfish-rbc".to_string(),
-        )
-        .await;
-
-        assert!(result.is_err_and(|error| {
-            error
-                .to_string()
-                .contains("vote-QC fast path requires embedded RBC-DAG authority")
-        }));
-    }
-
-    #[tokio::test]
-    async fn vote_qc_fast_path_requires_a_finite_benchmark() {
-        let committee_size = 4;
-        let committee = Committee::new_for_benchmarks(committee_size);
-        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
-        public_config.parameters.starfish_rbc_dag_shadow = true;
-        public_config.parameters.starfish_rbc_dag_autonomous_clock = true;
-        public_config
-            .parameters
-            .starfish_rbc_dag_embedded_rbc_authority = true;
-        public_config.parameters.starfish_rbc_dag_vote_qc_fast_path = true;
-        let private_config =
-            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
-                .remove(0);
-
-        let result = Validator::start(
-            0,
-            committee,
-            public_config,
-            private_config,
-            Parameters::default(),
-            "honest".to_string(),
-            "starfish-rbc".to_string(),
-        )
-        .await;
-
-        assert!(result.is_err_and(|error| {
-            error
-                .to_string()
-                .contains("vote-QC fast path is restricted to finite testbed benchmarks")
         }));
     }
 

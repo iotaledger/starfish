@@ -64,23 +64,20 @@ use crate::{
 
 // A mirror run must absorb one complete committee fan-in plus a small reserve;
 // autonomous repair additionally budgets a simultaneous request and response
-// per peer. At the four-MiB carrier cap, allowing at most 128 queued inputs
-// caps carrier payload retention at 512 MiB (plus bounded sidecars and
-// allocator overhead). This permits 124 mirror validators or 42 autonomous
-// validators, including the 40-validator comparison profile. Larger committees
-// are rejected for this benchmark prototype
+// per peer. At the four-MiB carrier cap, allowing at most 64 queued inputs also
+// caps carrier payload retention at 256 MiB (plus bounded sidecars and
+// allocator overhead). This permits 60 mirror validators or 20 autonomous
+// validators. Larger committees are rejected for this benchmark prototype
 // instead of silently under-sizing the queue and reporting incomparable
 // results.
 // Use the full bounded allowance even for a small committee. A single fan-in
 // reserve is insufficient when several round bursts arrive while the actor is
 // synchronously making the previous transition durable.
 const SHADOW_SERVICE_MIN_INPUT_CAPACITY_V1: usize = 64;
-const SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1: usize = 128;
+const SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1: usize = 64;
 const SHADOW_SERVICE_CONTROL_RESERVE_V1: usize = 5;
 const SHADOW_SERVICE_EVENT_CAPACITY_V1: usize = 16;
 const SHADOW_MAINTENANCE_INTERVAL_V1: Duration = Duration::from_millis(100);
-const SHADOW_APPLICATION_SUBMISSION_GRACE_V1: Duration = Duration::from_millis(100);
-const SHADOW_APPLICATION_SUBMISSION_GRACE_COMMITTEE_STEP_V1: usize = 10;
 const SHADOW_RECOVERY_RETRY_INTERVAL_V1: Duration = Duration::from_millis(500);
 const SHADOW_CARRIER_SYNC_RETRY_INTERVAL_V1: Duration = Duration::from_millis(100);
 // At most sixteen distinct exact slots may bypass the duplicate retry interval
@@ -99,12 +96,7 @@ const SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1: Duration = Duration::from_milli
 /// frame ceiling is larger; a dedicated configurable payload limit remains a
 /// deployment-hardening boundary. Keeping only a bounded recent window stops
 /// unsolicited sidecars from turning the actor into an unbounded cache.
-// Bound the materialized-payload/quarantine cache independently from history,
-// but size it for the same three-message-per-peer fan-in that the autonomous
-// actor accepts. A fixed 64-entry callback map is insufficient at n=40: two
-// adjacent carrier waves can complete verification while the actor applies
-// the previous wave. The global 128 ceiling keeps the testbed bound explicit.
-const SHADOW_APPLICATION_PAYLOAD_MIN_CAPACITY_V1: usize = 64;
+const SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1: usize = SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1;
 const SHADOW_APPLICATION_PAYLOAD_MAX_SIZE_V1: usize = MAX_CARRIER_CONTENT_SIZE_V1;
 const SHADOW_APPLICATION_PAYLOAD_RETRY_INTERVAL_V1: Duration = Duration::from_millis(500);
 /// Bound healthy physical-carrier production independently of actor/network
@@ -113,22 +105,6 @@ const SHADOW_APPLICATION_PAYLOAD_RETRY_INTERVAL_V1: Duration = Duration::from_mi
 /// bounded burst lane.
 const SHADOW_NORMAL_CARRIER_SPACING_DIVISOR_V1: u32 = 20;
 const SHADOW_NORMAL_CARRIER_MIN_SPACING_V1: Duration = Duration::from_millis(1);
-
-fn shadow_application_payload_capacity(committee_size: usize) -> usize {
-    committee_size.saturating_mul(3).clamp(
-        SHADOW_APPLICATION_PAYLOAD_MIN_CAPACITY_V1,
-        SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1,
-    )
-}
-
-fn shadow_application_submission_grace(committee_size: usize) -> Duration {
-    let fan_in_groups = committee_size
-        .max(1)
-        .div_ceil(SHADOW_APPLICATION_SUBMISSION_GRACE_COMMITTEE_STEP_V1);
-    SHADOW_APPLICATION_SUBMISSION_GRACE_V1
-        .checked_div(u32::try_from(fan_in_groups).unwrap_or(u32::MAX))
-        .unwrap_or_default()
-}
 
 type CarrierSyncSlotV1 = (RoundNumber, AuthorityIndex);
 type DesiredCarrierSyncResponseV1 = (AuthorityIndex, RbcDagShadowCarrierSyncResponse);
@@ -462,9 +438,10 @@ impl StarfishRbcDagShadowServiceHandleV1 {
             existing.acknowledge_assignment |= local.acknowledge_assignment;
             return Ok(());
         }
-        let capacity = shadow_application_payload_capacity(self.committee_size);
-        if desired.len() >= capacity {
-            return Err(ShadowServiceErrorV1::ApplicationStateCapacity { capacity });
+        if desired.len() >= SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1 {
+            return Err(ShadowServiceErrorV1::ApplicationStateCapacity {
+                capacity: SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1,
+            });
         }
         desired.insert(local.round, local);
         drop(desired);
@@ -761,9 +738,10 @@ impl StarfishRbcDagShadowServiceHandleV1 {
             }
             return Ok(());
         }
-        let capacity = shadow_application_payload_capacity(self.committee_size);
-        if desired.len() >= capacity {
-            return Err(ShadowServiceErrorV1::ApplicationStateCapacity { capacity });
+        if desired.len() >= SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1 {
+            return Err(ShadowServiceErrorV1::ApplicationStateCapacity {
+                capacity: SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1,
+            });
         }
         desired.insert(application, payload);
         drop(desired);
@@ -1249,7 +1227,6 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
         None,
         None,
         true,
-        false,
     )
 }
 
@@ -1284,7 +1261,6 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_with_metrics_v1(
         Some(metrics),
         None,
         true,
-        false,
     )
 }
 
@@ -1322,7 +1298,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
         None,
         None,
         true,
-        false,
     )
 }
 
@@ -1361,7 +1336,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_with_metrics_v1(
         Some(metrics),
         None,
         true,
-        false,
     )
 }
 
@@ -1404,7 +1378,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_paused_with_metric
         Some(metrics),
         None,
         false,
-        false,
     )
 }
 
@@ -1426,7 +1399,6 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
     metrics: Arc<Metrics>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
     clock_starts_active: bool,
-    vote_qc_fast_path: bool,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -1454,7 +1426,6 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
         Some(metrics),
         recovery_cursor,
         clock_starts_active,
-        vote_qc_fast_path,
     )
 }
 
@@ -1524,7 +1495,6 @@ fn spawn_consensus_timeout_deadline_task(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     path: impl AsRef<Path>,
     committee: RbcDagCommitteeContextV1,
@@ -1538,7 +1508,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     metrics: Option<Arc<Metrics>>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
     clock_starts_active: bool,
-    vote_qc_fast_path: bool,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -1720,7 +1689,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
                     authorizer,
                     wal_sync_policy,
                     recovery_cursor,
-                    vote_qc_fast_path,
                 )
             } else {
                 StarfishRbcDagShadowV1::open_with_wal_sync_policy(
@@ -1926,7 +1894,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
         for (carrier, header) in recovered_application_headers
             .into_iter()
             .rev()
-            .take(shadow_application_payload_capacity(committee_size))
+            .take(SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1)
         {
             authorized_applications.insert(
                 header.reference(),
@@ -1993,7 +1961,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             #[cfg(test)]
             sync_max_desired_responses: 0,
             awaiting_application_submission: false,
-            application_submission_deadline: None,
             consensus_pacemaker,
             consensus_timeout,
             normal_carrier_min_spacing: mode
@@ -2264,13 +2231,10 @@ struct ShadowServiceStateV1 {
     #[cfg(test)]
     sync_max_desired_responses: usize,
     /// A successful application-carrier assignment just released the core's
-    /// one-outstanding producer gate. Give that exact producer a bounded
-    /// maintenance epoch to submit its successor before any normal phase or
-    /// fallback work spends the next physical slot on a control carrier.
-    /// Repair traffic remains independently bounded and may bypass this
-    /// scheduling preference.
+    /// one-outstanding producer gate. Give that exact producer one actor turn
+    /// to submit its successor before C3 spends the next physical slot on a
+    /// control heartbeat. Maintenance/heartbeat messages bound the wait.
     awaiting_application_submission: bool,
-    application_submission_deadline: Option<Instant>,
     consensus_pacemaker: ConsensusPacemakerV1,
     /// Logical C2 fallback deadline. This is independent of the physical
     /// heartbeat so experiments can vary consensus permission without
@@ -2315,7 +2279,6 @@ impl ShadowServiceStateV1 {
         self.consensus_pacemaker =
             ConsensusPacemakerV1::new(self.core.next_local_consensus_round());
         self.awaiting_application_submission = false;
-        self.application_submission_deadline = None;
         self.heartbeat_notification_pending
             .store(false, Ordering::Release);
 
@@ -2426,9 +2389,8 @@ impl ShadowServiceStateV1 {
     }
 
     fn make_application_state_room(&mut self, application: BlockReference) {
-        let capacity = shadow_application_payload_capacity(self.committee_size);
         if self.authorized_applications.contains_key(&application)
-            || self.authorized_applications.len() < capacity
+            || self.authorized_applications.len() < SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1
         {
             return;
         }
@@ -2520,8 +2482,7 @@ impl ShadowServiceStateV1 {
         payload: Option<Arc<TransactionData>>,
     ) -> Result<(), ShadowServiceErrorV1> {
         if !self.quarantined_application_payloads.contains_key(&carrier)
-            && self.quarantined_application_payloads.len()
-                >= shadow_application_payload_capacity(self.committee_size)
+            && self.quarantined_application_payloads.len() >= SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1
         {
             self.quarantined_application_payloads.pop_first();
         }
@@ -2797,7 +2758,6 @@ impl ShadowServiceStateV1 {
         let desired = std::mem::take(&mut *self.desired_local_applications.lock());
         if !desired.is_empty() {
             self.awaiting_application_submission = false;
-            self.application_submission_deadline = None;
         }
         for local in desired.into_values() {
             self.enqueue_local(local);
@@ -3267,7 +3227,6 @@ impl ShadowServiceStateV1 {
             return;
         }
         self.awaiting_application_submission = false;
-        self.application_submission_deadline = None;
     }
 
     fn cancel_normal_carrier_deadline(&mut self) {
@@ -3461,8 +3420,6 @@ impl ShadowServiceStateV1 {
                 self.report_wal_delta(before);
                 if let Some(reference) = assigned_application {
                     self.awaiting_application_submission = true;
-                    self.application_submission_deadline = Instant::now()
-                        .checked_add(shadow_application_submission_grace(self.committee_size));
                     self.emit(ShadowServiceEventV1::ApplicationAssigned(reference));
                 }
                 if let Some(application) = application {
@@ -3671,25 +3628,6 @@ impl ShadowServiceStateV1 {
     /// harmless idempotent replays.
     fn retry_pending_local(&mut self) {
         if self.mode.is_autonomous() {
-            // The producer is released only after its previous application
-            // carrier is durably fixed. Phase effects from that transition
-            // are processed synchronously and would otherwise consume the
-            // newly opened physical slot before the producer's successor can
-            // cross the ordered Core bridge. Piggyback those phases on the
-            // successor when it arrives. A deadline anchored at assignment
-            // retries the phase carrier after 100 ms, so a stalled producer
-            // cannot stop physical RBC progress.
-            if self.awaiting_application_submission && self.pending_local.is_empty() {
-                let now = Instant::now();
-                if let Some(deadline) = self.application_submission_deadline {
-                    if now < deadline {
-                        self.schedule_normal_carrier_deadline(deadline);
-                        return;
-                    }
-                }
-                self.awaiting_application_submission = false;
-                self.application_submission_deadline = None;
-            }
             while (!self.pending_local.is_empty() || self.core.has_pending_application_phase_work())
                 && self.core.can_create_carrier()
                 && !self.fatal
@@ -4638,8 +4576,8 @@ fn run_shadow_service(
             }
             ShadowServiceMessageV1::TopologyChanged => {}
             ShadowServiceMessageV1::RetryRecovery => {
+                state.awaiting_application_submission = false;
                 state.reconcile_local_applications();
-                state.retry_pending_local();
                 state.reconcile_pending_recovery();
                 state.flush_recovery_requests();
                 state.flush_carrier_sync_requests(false);
@@ -4647,7 +4585,6 @@ fn run_shadow_service(
             }
             ShadowServiceMessageV1::HeartbeatTick => {
                 state.awaiting_application_submission = false;
-                state.application_submission_deadline = None;
                 state.try_create_autonomous_carrier();
             }
             ShadowServiceMessageV1::NormalCarrierDeadline { generation } => {
@@ -5827,7 +5764,6 @@ mod tests {
                 None,
                 None,
                 false,
-                false,
             )
             .unwrap()
         }
@@ -5919,7 +5855,6 @@ mod tests {
             sync_max_outstanding: 0,
             sync_max_desired_responses: 0,
             awaiting_application_submission: false,
-            application_submission_deadline: None,
             consensus_pacemaker: ConsensusPacemakerV1::new(slot),
             consensus_timeout: leader_timeout,
             // Existing state-level tests invoke creation synchronously and do
@@ -6846,8 +6781,7 @@ mod tests {
         );
         tokio::task::spawn_blocking(move || {
             let mut state = state;
-            let capacity = shadow_application_payload_capacity(N);
-            for offset in 0..=capacity {
+            for offset in 0..=SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1 {
                 let round = offset as RoundNumber + 1;
                 let header = direct_header(0, round, offset as u8);
                 state
@@ -6861,9 +6795,12 @@ mod tests {
                     )
                     .unwrap();
             }
-            assert_eq!(state.authorized_applications.len(), capacity);
+            assert_eq!(
+                state.authorized_applications.len(),
+                SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1
+            );
 
-            for offset in 0..=capacity {
+            for offset in 0..=SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1 {
                 let round = offset as RoundNumber + 1;
                 state
                     .quarantine_application(
@@ -6874,7 +6811,10 @@ mod tests {
                     )
                     .unwrap();
             }
-            assert_eq!(state.quarantined_application_payloads.len(), capacity);
+            assert_eq!(
+                state.quarantined_application_payloads.len(),
+                SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1
+            );
             state.core.shutdown().unwrap();
         })
         .await
@@ -6900,7 +6840,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let mut state = state;
             let mut applications = Vec::new();
-            for offset in 0..=shadow_application_payload_capacity(N) {
+            for offset in 0..=SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1 {
                 let round = offset as RoundNumber + 1;
                 let header = direct_header(0, round, offset as u8);
                 applications.push(header.reference());
@@ -7255,47 +7195,6 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(acknowledgments, vec![expected_reference]);
-        state.core.shutdown().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn application_submission_grace_is_anchored_bounded_and_coalesced() {
-        let harness = Harness::new();
-        let (core, _) = StarfishRbcDagShadowV1::open(
-            &harness.paths[0],
-            harness.committee.clone(),
-            0,
-            harness.context,
-            ShadowAuthorizerV1::MacVector(harness.keyrings[0].clone()),
-        )
-        .unwrap();
-        let (mut state, _events, _message_rx, _message_tx) = standalone_autonomous_state(
-            core,
-            harness.committee.clone(),
-            Duration::from_secs(60 * 60),
-        );
-
-        let round = state.core.local_carrier_round();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        state.awaiting_application_submission = true;
-        state.application_submission_deadline = Some(deadline);
-        state.retry_pending_local();
-        assert_eq!(state.core.local_carrier_round(), round);
-        assert_eq!(
-            state
-                .normal_carrier_deadline
-                .expect("the grace must reuse the coalesced carrier wake")
-                .deadline,
-            deadline
-        );
-
-        let generation = state.normal_carrier_generation;
-        state.retry_pending_local();
-        assert_eq!(state.normal_carrier_generation, generation);
-        state.application_submission_deadline = Some(Instant::now());
-        state.retry_pending_local();
-        assert!(!state.awaiting_application_submission);
-        assert_eq!(state.application_submission_deadline, None);
         state.core.shutdown().unwrap();
     }
 
@@ -9089,8 +8988,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maximum_mirror_burst_fits_before_the_actor_drains() {
-        const LARGE_N: usize = 124;
+    async fn sixty_validator_burst_fits_before_the_actor_drains() {
+        const LARGE_N: usize = 60;
         let input_capacity =
             shadow_input_capacity(LARGE_N, ShadowServiceModeV1::DirectMirror).unwrap();
         assert_eq!(input_capacity, SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1);
@@ -9134,33 +9033,17 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_burst_budget_accepts_forty_two_and_rejects_forty_three() {
+    fn autonomous_burst_budget_accepts_twenty_and_rejects_twenty_one() {
         let mode = ShadowServiceModeV1::AutonomousClock {
             heartbeat_interval: Duration::from_millis(250),
         };
-        assert_eq!(shadow_application_payload_capacity(10), 64);
-        assert_eq!(shadow_application_payload_capacity(40), 120);
-        assert_eq!(shadow_application_payload_capacity(42), 126);
-        assert_eq!(
-            shadow_application_submission_grace(10),
-            Duration::from_millis(100)
-        );
-        assert_eq!(
-            shadow_application_submission_grace(40),
-            Duration::from_millis(25)
-        );
-        assert_eq!(
-            shadow_application_submission_grace(42),
-            Duration::from_millis(20)
-        );
-        assert_eq!(shadow_input_capacity(40, mode).unwrap(), 122);
-        assert_eq!(shadow_input_capacity(42, mode).unwrap(), 128);
+        assert_eq!(shadow_input_capacity(20, mode).unwrap(), 64);
         assert!(matches!(
-            shadow_input_capacity(43, mode),
+            shadow_input_capacity(21, mode),
             Err(ShadowServiceErrorV1::CommitteeBurstTooLarge {
-                committee_size: 43,
-                required_capacity: 131,
-                maximum_capacity: 128,
+                committee_size: 21,
+                required_capacity: 65,
+                maximum_capacity: 64,
             })
         ));
     }

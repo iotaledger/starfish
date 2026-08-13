@@ -79,12 +79,6 @@ single-slot exact synchronization rather than checkpoint or proof-safe late-node
 Its current authoritative journal uses the V4 autonomous WAL namespace with `SRD5` raw records so
 older traces cannot be reinterpreted under the optimistic-delivery rules.
 
-Strict two-level Starfish finality remains the default. The local benchmark additionally exposes
-`--starfish-rbc-dag-vote-qc-fast-path`, a deliberately flagged testbed experiment that commits an
-exact projected leader as soon as its projected vote quorum is present instead of waiting for the
-second certifier wave. It sends no additional protocol messages, but changes the proof shape and
-must not be reported as the strict or production Starfish result.
-
 The default WAL syncs every transition. `--starfish-rbc-dag-shadow-buffered-wal` preserves ordered
 frames but syncs only on clean shutdown and is not crash-safe. Actor replay covers the state
 explicitly documented in the protocol design; full validator crash recovery, bounded checkpoint
@@ -359,9 +353,6 @@ cargo run --release --bin starfish -- local-benchmark \
 ```
 
 The buffered WAL is benchmark-only and is not crash-safe.
-
-To measure the separately labelled testbed fast path, append
-`--starfish-rbc-dag-vote-qc-fast-path`. Omitting it always measures the strict two-level rule.
 
 ### Local dryrun with monitoring and dashboard
 
