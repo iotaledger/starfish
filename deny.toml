@@ -92,6 +92,11 @@ skip = [
   { name = "protobuf", version = "2" },
 ]
 skip-tree = [
+  # RustCrypto post-quantum signature crates track the digest 0.11 /
+  # crypto-common 0.2 / rand_core 0.10 pre-release line while the rest of the
+  # workspace still uses the previous releases.
+  { name = "ml-dsa" },
+  { name = "slh-dsa" },
   # aws-smithy-http-client depends on both hyper 0.14 and 1.x,
   # pulling old http/http-body/h2/rustls/tokio-rustls/socket2/core-foundation stacks
   { name = "aws-smithy-http-client" },

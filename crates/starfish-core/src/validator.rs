@@ -14,6 +14,7 @@ use eyre::{Context, Result, eyre};
 use tokio::sync::mpsc;
 
 use crate::{
+    block_authentication::BlockAuthenticationScheme,
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
@@ -45,6 +46,14 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
+        let block_authentication = public_config.parameters.block_authentication;
+        validate_block_authentication_keys(
+            authority,
+            &committee,
+            &private_config,
+            block_authentication,
+        )?;
+
         // Network and metrics setup remains the same
         let network_address = public_config
             .network_address(authority)
@@ -80,6 +89,7 @@ impl Validator {
         let resolved_dissemination =
             protocol.resolve_dissemination_mode(public_config.parameters.dissemination_mode);
         let dissemination_str = resolved_dissemination.to_string();
+        tracing::info!("Block authentication scheme: {block_authentication}");
         let (metrics, reporter) = Metrics::new(
             &registry,
             Some(&committee),
@@ -108,6 +118,7 @@ impl Validator {
             committee.clone(),
             byzantine_strategy,
             consensus,
+            block_authentication,
             &parameters.storage_backend,
             public_config
                 .parameters
@@ -217,6 +228,43 @@ impl Validator {
     }
 }
 
+/// Fail fast when the committee or this validator's private config lacks the
+/// key material for the configured block-authentication scheme, or when the
+/// private key does not correspond to the committee entry.
+fn validate_block_authentication_keys(
+    authority: AuthorityIndex,
+    committee: &Committee,
+    private_config: &NodePrivateConfig,
+    scheme: BlockAuthenticationScheme,
+) -> Result<()> {
+    let expected = committee
+        .get_public_key(authority)
+        .ok_or_else(|| eyre!("Authority {authority} is not a committee member"))?;
+    if private_config.keypair.public_key() != *expected {
+        return Err(eyre!(
+            "Ed25519 key of authority {authority} does not match the committee entry"
+        ));
+    }
+    if !scheme.is_post_quantum() {
+        return Ok(());
+    }
+    if !committee.supports_block_authentication(scheme) {
+        return Err(eyre!(
+            "Committee carries no {scheme} public keys; regenerate the genesis with \
+             `--block-authentication {scheme}`"
+        ));
+    }
+    let signing_key = private_config
+        .block_signing_key(scheme)
+        .ok_or_else(|| eyre!("Private config of authority {authority} has no {scheme} key"))?;
+    if committee.block_public_key(authority, scheme) != Some(&signing_key.public_key()) {
+        return Err(eyre!(
+            "{scheme} key of authority {authority} does not match the committee entry"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod smoke_tests {
     use std::{
@@ -232,6 +280,7 @@ mod smoke_tests {
 
     use super::Validator;
     use crate::{
+        block_authentication::BlockAuthenticationScheme,
         committee::Committee,
         config::{self, NodePrivateConfig, NodePublicConfig, Parameters},
         prometheus,
@@ -262,14 +311,33 @@ mod smoke_tests {
     }
 
     async fn run_commit_test(consensus: &str, port_offset: u16) {
+        run_commit_test_with_authentication(
+            consensus,
+            BlockAuthenticationScheme::Ed25519,
+            port_offset,
+        )
+        .await;
+    }
+
+    async fn run_commit_test_with_authentication(
+        consensus: &str,
+        block_authentication: BlockAuthenticationScheme,
+        port_offset: u16,
+    ) {
         let committee_size = 4;
-        let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let committee =
+            Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication;
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
-        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
+        let private_configs = NodePrivateConfig::new_for_benchmarks_with_authentication(
+            dir.as_ref(),
+            committee_size,
+            block_authentication,
+        );
         for pc in &private_configs {
             fs::create_dir_all(&pc.storage_path).unwrap();
         }
@@ -326,6 +394,52 @@ mod smoke_tests {
     #[tokio::test]
     async fn validator_commit_bluestreak_basic() {
         run_commit_test("bluestreak", 150).await;
+    }
+
+    #[test_case("starfish", BlockAuthenticationScheme::MlDsa65, 700)]
+    #[test_case("mysticeti", BlockAuthenticationScheme::MlDsa44, 720)]
+    #[test_case("starfish-bls", BlockAuthenticationScheme::MlDsa87, 740)]
+    // Only the fast-signing SLH-DSA `f` parameter sets are exercised
+    // end-to-end; the slow `s` variants sign too slowly for per-block use in a
+    // latency-bounded smoke test. Their sign/verify correctness is covered by
+    // the `block_authentication` and `types` unit tests, which sign directly.
+    #[test_case("bluestreak", BlockAuthenticationScheme::SlhDsaSha2_128f, 760)]
+    #[test_case("sparse-starfish-speed", BlockAuthenticationScheme::MlDsa44, 780)]
+    #[test_case("sailfish++", BlockAuthenticationScheme::MlDsa65, 800)]
+    #[tokio::test]
+    async fn validator_commit_with_post_quantum_authentication(
+        consensus: &str,
+        block_authentication: BlockAuthenticationScheme,
+        port_offset: u16,
+    ) {
+        run_commit_test_with_authentication(consensus, block_authentication, port_offset).await;
+    }
+
+    #[tokio::test]
+    async fn validator_start_rejects_missing_post_quantum_keys() {
+        let committee_size = 4;
+        // Ed25519-only committee, but the node parameters select ML-DSA-44.
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(820);
+        public_config.parameters.block_authentication = BlockAuthenticationScheme::MlDsa44;
+        let dir = TempDir::new().unwrap();
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(0);
+
+        let error = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish".to_string(),
+        )
+        .await
+        .err()
+        .expect("validator must refuse to start without ml-dsa-44 keys");
+        assert!(error.to_string().contains("ml-dsa-44"), "{error}");
     }
 
     async fn run_sync_test(consensus: &str, port_offset: u16) {

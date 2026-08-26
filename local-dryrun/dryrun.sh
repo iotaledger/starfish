@@ -10,6 +10,9 @@ DESIRED_TPS=${DESIRED_TPS:-100}
 #          starfish-bls, cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
 CONSENSUS=${CONSENSUS:- sparse-starfish-speed}
+# Block signature scheme: ed25519 (default), ml-dsa-44, ml-dsa-65, ml-dsa-87,
+#   slh-dsa-sha2-{128,192,256}{s,f}
+BLOCK_AUTHENTICATION=${BLOCK_AUTHENTICATION:-}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -572,6 +575,9 @@ EOH
         fi
         if [ "${COMPRESS_NETWORK:-0}" = 1 ]; then
             PARAM_FLAGS+=" --compress-network"
+        fi
+        if [ -n "$BLOCK_AUTHENTICATION" ]; then
+            PARAM_FLAGS+=" --block-authentication $BLOCK_AUTHENTICATION"
         fi
 
         cat <<EOV

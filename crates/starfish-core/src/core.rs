@@ -10,6 +10,7 @@ use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::sync::mpsc;
 
 use crate::{
+    block_authentication::{BlockSigner, BlockSigningKey},
     block_handler::BlockHandler,
     block_manager::BlockManager,
     bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
@@ -60,6 +61,9 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
+    /// Post-quantum block signing key; `None` when blocks are authenticated
+    /// with the Ed25519 identity key.
+    block_signing_key: Option<BlockSigningKey>,
     partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
@@ -171,6 +175,16 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
+        let block_authentication_scheme = dag_state.block_authentication_scheme;
+        let block_signing_key = block_authentication_scheme.is_post_quantum().then(|| {
+            private_config
+                .block_signing_key(block_authentication_scheme)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!("private config carries no {block_authentication_scheme} signing key")
+                })
+        });
+
         let this = Self {
             block_manager,
             store,
@@ -185,6 +199,7 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
+            block_signing_key,
             partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
@@ -204,6 +219,14 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn get_signer(&self) -> &Signer {
         &self.signer
+    }
+
+    /// Key material that authenticates blocks produced by this validator.
+    fn block_signer(&self) -> BlockSigner<'_> {
+        match &self.block_signing_key {
+            Some(key) => BlockSigner::PostQuantum(key),
+            None => BlockSigner::Ed25519(&self.signer),
+        }
     }
 
     pub fn get_universal_committer(&self) -> UniversalCommitter {
@@ -991,14 +1014,14 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
+        let mut block = VerifiedBlock::new_with_block_signer_and_unprovable(
             self.authority,
             clock_round,
             block_references,
             voted_leader_ref,
             acknowledgment_references.to_vec(),
             time_ns,
-            &self.signer,
+            &self.block_signer(),
             bls_signer_opt,
             committee_opt,
             aggregate_dac_sigs,
@@ -1522,6 +1545,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        block_authentication::BlockAuthenticationScheme,
         bls_certificate_aggregator::CertificateEvent,
         config::{DisseminationMode, NodePrivateConfig, StorageBackend},
         crypto::{self, BlsSigner, Signer},
@@ -1642,6 +1666,7 @@ mod tests {
             committee.clone(),
             "honest".to_string(),
             "bluestreak".to_string(),
+            BlockAuthenticationScheme::Ed25519,
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,
@@ -1708,6 +1733,7 @@ mod tests {
             committee.clone(),
             "honest".to_string(),
             "mysticeti-bls".to_string(),
+            BlockAuthenticationScheme::Ed25519,
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,
@@ -1789,6 +1815,7 @@ mod tests {
             committee.clone(),
             "honest".to_string(),
             "mysticeti-bls".to_string(),
+            BlockAuthenticationScheme::Ed25519,
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,

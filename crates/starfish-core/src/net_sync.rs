@@ -22,6 +22,7 @@ use tokio::{
 };
 
 use crate::{
+    block_authentication::BlockAuthenticationScheme,
     block_handler::BlockHandler,
     bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     bls_service::{BlsServiceHandle, BlsServiceMessage, start_bls_service},
@@ -416,6 +417,7 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
     sender: mpsc::Sender<NetworkMessage>,
     bls_service: Option<BlsServiceHandle>,
     consensus_protocol: ConsensusProtocol,
+    block_authentication_scheme: BlockAuthenticationScheme,
     peer: String,
     peer_id: AuthorityIndex,
     own_id: AuthorityIndex,
@@ -435,12 +437,13 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 }
                 let mut block: VerifiedBlock = (*data_block).clone();
                 tracing::debug!("Received {} from {}", block, peer);
-                match block.verify(
+                match block.verify_with_scheme(
                     &inner.committee,
                     own_id as usize,
                     peer_id as usize,
                     &mut encoder,
                     consensus_protocol,
+                    block_authentication_scheme,
                 ) {
                     Ok(shard) => {
                         debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
@@ -543,6 +546,7 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
 /// into a struct so the 400-line match body can be split into focused handlers.
 struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static> {
     consensus_protocol: ConsensusProtocol,
+    block_authentication_scheme: BlockAuthenticationScheme,
     inner: Arc<NetworkSyncerInner<H, C>>,
     metrics: Arc<Metrics>,
     filter_for_blocks: Arc<FilterForBlocks>,
@@ -580,6 +584,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         sailfish_service: Option<SailfishServiceHandle>,
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
+        let block_authentication_scheme = inner.dag_state.block_authentication_scheme;
         let committee_size = inner.dag_state.committee_size;
         let broadcaster_parameters = BroadcasterParameters::new(
             committee_size,
@@ -628,6 +633,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             connection.sender.clone(),
             bls_service.clone(),
             consensus_protocol,
+            block_authentication_scheme,
             peer.clone(),
             peer_id,
             own_id,
@@ -635,6 +641,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         Self {
             consensus_protocol,
+            block_authentication_scheme,
             inner,
             metrics,
             filter_for_blocks,
@@ -975,12 +982,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            let shard = match block.verify(
+            let shard = match block.verify_with_scheme(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
+                self.block_authentication_scheme,
             ) {
                 Ok(shard) => shard,
                 Err(e) => {
@@ -2363,7 +2371,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::SignatureBytes,
+        block_authentication::BlockAuthentication,
         types::{BaseTransaction, BlockReference},
     };
 
@@ -2390,7 +2398,7 @@ mod tests {
             vec![BlockReference::new_test(0, 3)],
             vec![ack_ref],
             0,
-            SignatureBytes::default(),
+            BlockAuthentication::None,
             Vec::<BaseTransaction>::new(),
             None,
             None,

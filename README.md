@@ -59,6 +59,35 @@ achieving 2-round optimistic commit latency.
 leader, data availability) in block headers, with async verification
 offloaded from the critical path.
 
+## Block Authentication
+
+Block headers are content-addressed: `BlockReference.digest` is the
+BLAKE3 hash of the header content, and the author's authentication
+proof is a separate header field that does not enter the digest. The
+signature scheme is therefore independent of the consensus protocol and
+can be selected for every protocol with `--block-authentication`
+(CLI and orchestrator) or `block_authentication` in the node parameters
+file:
+
+| Scheme | Value | Public key | Signature |
+|---|---|---:|---:|
+| Ed25519 (default) | `ed25519` | 32 B | 64 B |
+| ML-DSA-44 (FIPS 204) | `ml-dsa-44` | 1,312 B | 2,420 B |
+| ML-DSA-65 | `ml-dsa-65` | 1,952 B | 3,309 B |
+| ML-DSA-87 | `ml-dsa-87` | 2,592 B | 4,627 B |
+| SLH-DSA-SHA2-128s (FIPS 205) | `slh-dsa-sha2-128s` | 32 B | 7,856 B |
+| SLH-DSA-SHA2-128f | `slh-dsa-sha2-128f` | 32 B | 17,088 B |
+| SLH-DSA-SHA2-192s / 192f | `slh-dsa-sha2-192s`, `slh-dsa-sha2-192f` | 48 B | 16,224 / 35,664 B |
+| SLH-DSA-SHA2-256s / 256f | `slh-dsa-sha2-256s`, `slh-dsa-sha2-256f` | 64 B | 29,792 / 49,856 B |
+
+Post-quantum key material is generated at genesis only for the selected
+scheme (`starfish benchmark-genesis --block-authentication ml-dsa-65`);
+a validator refuses to start if the committee or its private config
+lacks keys for the configured scheme. Protocol-specific BLS
+certificates are unaffected. The `ml-dsa` and `slh-dsa` crates are
+RustCrypto pre-releases that have not been independently audited; this
+is benchmark code, not production cryptography.
+
 ## Dissemination Modes
 
 Every protocol can run with any of three dissemination strategies

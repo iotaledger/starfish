@@ -22,6 +22,7 @@ hex = "0.4.3"
 libc = "0.2.146"
 lz4_flex = "0.11"
 memmap2 = "0.7.0"
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "zeroize"] }
 
 parking_lot = "0.12.1"
 prettytable-rs = "0.10"
@@ -33,6 +34,7 @@ rocksdb = { version = "0.22.0", features = ["snappy", "lz4", "zlib", "zstd", "mu
 rs_merkle = "1.4.2"
 serde = { workspace = true }
 serde_yaml = "0.9.21"
+slh-dsa = { version = "0.2.0-rc.5", features = ["zeroize"] }
 tabled = "0.12.2"
 tempfile = { workspace = true } # todo - move to dev-dep
 tidehunter = { git = "https://github.com/MystenLabs/tidehunter", rev = "cfe208a", optional = true }

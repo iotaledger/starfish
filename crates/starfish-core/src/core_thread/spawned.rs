@@ -405,6 +405,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        block_authentication::BlockAuthenticationScheme,
         block_handler::BlockHandler,
         committee::Committee,
         config::{DisseminationMode, NodePrivateConfig, StorageBackend},
@@ -463,6 +464,7 @@ mod tests {
             committee.clone(),
             "honest".to_string(),
             "mysticeti".to_string(),
+            BlockAuthenticationScheme::Ed25519,
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,

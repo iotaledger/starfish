@@ -5,7 +5,6 @@
 use std::fmt;
 
 use blst::min_sig as bls;
-use ed25519_consensus::Signature;
 use rand::{SeedableRng, rngs::StdRng};
 use rs_merkle::{Hasher, MerkleProof, MerkleTree};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -15,8 +14,8 @@ use crate::{
     committee::Committee,
     crypto,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
-        Shard, TimestampNs,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, RoundNumber, Shard,
+        TimestampNs,
     },
 };
 
@@ -174,14 +173,21 @@ impl TransactionsCommitment {
         proof.verify(merkle_root.0, &[leaf_index], &[leaf_to_prove], tree_size)
     }
 }
+/// The block digest is the BLAKE3 hash of the header *content* only. The
+/// authentication proof (`BlockHeader::authentication`) is computed over this
+/// digest and is deliberately excluded from it, so the block reference does
+/// not depend on the signature scheme.
 impl BlockDigest {
+    pub fn as_array(&self) -> &[u8; BLOCK_DIGEST_SIZE] {
+        &self.0
+    }
+
     pub fn new_without_transactions(
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
@@ -191,7 +197,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            signature,
             merkle_root,
             strong_vote,
             None,
@@ -204,13 +209,12 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
-        Self::digest_without_signature(
+        Self::digest_contents(
             &mut hasher,
             authority,
             round,
@@ -221,7 +225,6 @@ impl BlockDigest {
             strong_vote,
         );
         Self::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
@@ -231,7 +234,6 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
@@ -241,7 +243,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            signature,
             transactions_commitment,
             strong_vote,
             None,
@@ -254,13 +255,12 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
-        Self::digest_without_signature(
+        Self::digest_contents(
             &mut hasher,
             authority,
             round,
@@ -271,11 +271,10 @@ impl BlockDigest {
             strong_vote,
         );
         Self::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
-    pub(crate) fn digest_without_signature(
+    pub(crate) fn digest_contents(
         hasher: &mut Blake3Hasher,
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -305,7 +304,7 @@ impl BlockDigest {
 
     /// Extend a block digest hasher with the generalized unprovable
     /// certificate reference + strong/standard flavor flag. Called after
-    /// `digest_without_signature` and before finalizing. No-op when `None`,
+    /// `digest_contents` and before finalizing. No-op when `None`,
     /// preserving backward compatibility.
     pub(crate) fn hash_unprovable_certificate(
         hasher: &mut Blake3Hasher,
@@ -474,32 +473,6 @@ fn deserialize_fixed_bytes<'de, D: Deserializer<'de>, const N: usize>(
 }
 
 impl PublicKey {
-    pub fn verify_signature_in_block(
-        &self,
-        header: &BlockHeader,
-        transactions_commitment: Option<TransactionsCommitment>,
-    ) -> Result<(), ed25519_consensus::Error> {
-        let signature = Signature::from(header.signature().0);
-        let acknowledgments = header.acknowledgments();
-        let mut hasher = Blake3Hasher::new();
-        BlockDigest::digest_without_signature(
-            &mut hasher,
-            header.authority(),
-            header.round(),
-            header.block_references(),
-            &acknowledgments,
-            header.meta_creation_time_ns(),
-            transactions_commitment,
-            header.strong_vote(),
-        );
-        BlockDigest::hash_unprovable_certificate(
-            &mut hasher,
-            header.unprovable_certificate.as_ref(),
-        );
-        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
-        self.0.verify(&signature, digest.as_ref())
-    }
-
     pub fn to_bytes(&self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(self.0.as_ref());
@@ -510,8 +483,8 @@ impl PublicKey {
         ed25519_consensus::VerificationKey::try_from(*bytes).map(Self)
     }
 
-    /// Verify an Ed25519 signature over a 32-byte digest. Used for
-    /// Sailfish++ timeout and no-vote message verification.
+    /// Verify an Ed25519 signature over a 32-byte digest (block content
+    /// digest or Sailfish++ control message).
     pub fn verify_digest_signature(
         &self,
         digest: &[u8; 32],
@@ -530,58 +503,8 @@ impl Signer {
             .collect()
     }
 
-    pub fn sign_block(
-        &self,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        block_references: &[BlockReference],
-        acknowledgment_references: &[BlockReference],
-        meta_creation_time_ns: TimestampNs,
-        transactions_commitment: Option<TransactionsCommitment>,
-        strong_vote: Option<AuthoritySet>,
-    ) -> SignatureBytes {
-        self.sign_block_with_unprovable(
-            authority,
-            round,
-            block_references,
-            acknowledgment_references,
-            meta_creation_time_ns,
-            transactions_commitment,
-            strong_vote,
-            None,
-        )
-    }
-
-    pub fn sign_block_with_unprovable(
-        &self,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        block_references: &[BlockReference],
-        acknowledgment_references: &[BlockReference],
-        meta_creation_time_ns: TimestampNs,
-        transactions_commitment: Option<TransactionsCommitment>,
-        strong_vote: Option<AuthoritySet>,
-        unprovable_certificate: Option<&(BlockReference, bool)>,
-    ) -> SignatureBytes {
-        let mut hasher = Blake3Hasher::new();
-        BlockDigest::digest_without_signature(
-            &mut hasher,
-            authority,
-            round,
-            block_references,
-            acknowledgment_references,
-            meta_creation_time_ns,
-            transactions_commitment,
-            strong_vote,
-        );
-        BlockDigest::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
-        let signature = self.0.sign(digest.as_ref());
-        SignatureBytes(signature.to_bytes())
-    }
-
-    /// Sign a pre-computed 32-byte digest. Used for Sailfish++ control
-    /// messages (timeout, no-vote) that don't fit the block-signing schema.
+    /// Sign a pre-computed 32-byte digest: the block content digest for
+    /// Ed25519 block authentication, or a Sailfish++ control message digest.
     pub fn sign_digest(&self, digest: &[u8; 32]) -> SignatureBytes {
         let signature = self.0.sign(digest.as_ref());
         SignatureBytes(signature.to_bytes())
@@ -601,6 +524,16 @@ impl AsRef<[u8]> for TransactionsCommitment {
 impl AsRef<[u8]> for BlockDigest {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for SignatureBytes {
+    type Error = String;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        <[u8; SIGNATURE_SIZE]>::try_from(bytes)
+            .map(Self)
+            .map_err(|_| format!("invalid Ed25519 signature length {}", bytes.len()))
     }
 }
 

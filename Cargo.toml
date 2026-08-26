@@ -22,3 +22,14 @@ bindgen = "=0.71"
 [profile.release]
 panic = "abort"
 debug = 1
+
+# Post-quantum signature crates are ~10x slower unoptimized; keep them fast in
+# dev/test builds so PQ-authenticated smoke tests stay within their timeouts.
+[profile.dev.package.ml-dsa]
+opt-level = 3
+[profile.dev.package.slh-dsa]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3

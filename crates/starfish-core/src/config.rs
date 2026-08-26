@@ -12,6 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
+    block_authentication::{BlockAuthenticationScheme, BlockSigningKey, benchmark_seed},
     crypto::{BlsPublicKey, BlsSigner, Signer, dummy_bls_signer, dummy_signer},
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
@@ -54,6 +55,10 @@ pub struct NodeParameters {
     pub bls_verification_workers: usize,
     #[serde(default)]
     pub dissemination_mode: DisseminationMode,
+    /// Signature scheme authenticating block headers. Independent of the
+    /// consensus protocol; defaults to Ed25519.
+    #[serde(default)]
+    pub block_authentication: BlockAuthenticationScheme,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -127,6 +132,7 @@ impl Default for NodeParameters {
             compress_network: node_defaults::default_compress_network(),
             bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),
+            block_authentication: BlockAuthenticationScheme::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
@@ -270,6 +276,9 @@ pub struct NodePrivateConfig {
     authority: AuthorityIndex,
     pub keypair: Signer,
     pub bls_keypair: BlsSigner,
+    /// Post-quantum block-authentication keys, at most one per scheme.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pq_keypairs: Vec<BlockSigningKey>,
     pub storage_path: PathBuf,
 }
 
@@ -279,11 +288,27 @@ impl NodePrivateConfig {
             authority: index,
             keypair: dummy_signer(),
             bls_keypair: dummy_bls_signer(),
+            pq_keypairs: Vec::new(),
             storage_path: PathBuf::from("storage"),
         }
     }
 
     pub fn new_for_benchmarks(working_dir: &Path, committee_size: usize) -> Vec<Self> {
+        Self::new_for_benchmarks_with_authentication(
+            working_dir,
+            committee_size,
+            BlockAuthenticationScheme::Ed25519,
+        )
+    }
+
+    /// Benchmark private configs that additionally carry the signing key for
+    /// `block_authentication`, matching
+    /// [`crate::committee::Committee::new_for_benchmarks_with_authentication`].
+    pub fn new_for_benchmarks_with_authentication(
+        working_dir: &Path,
+        committee_size: usize,
+        block_authentication: BlockAuthenticationScheme,
+    ) -> Vec<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
         signers
@@ -297,10 +322,21 @@ impl NodePrivateConfig {
                     authority,
                     keypair,
                     bls_keypair,
+                    pq_keypairs: BlockSigningKey::from_seed(
+                        block_authentication,
+                        &benchmark_seed(block_authentication, authority as u64),
+                    )
+                    .into_iter()
+                    .collect(),
                     storage_path: path,
                 }
             })
             .collect()
+    }
+
+    /// Signing key for a post-quantum `scheme`, if this config carries one.
+    pub fn block_signing_key(&self, scheme: BlockAuthenticationScheme) -> Option<&BlockSigningKey> {
+        self.pq_keypairs.iter().find(|key| key.scheme() == scheme)
     }
 
     pub fn default_filename(authority: AuthorityIndex) -> PathBuf {
@@ -464,3 +500,62 @@ impl Default for Parameters {
 }
 
 impl ImportExport for Parameters {}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{AuthorityIndex, NodeParameters, NodePrivateConfig};
+    use crate::block_authentication::BlockAuthenticationScheme;
+
+    #[test]
+    fn node_parameters_default_to_ed25519_and_accept_scheme_names() {
+        let parameters: NodeParameters = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(
+            parameters.block_authentication,
+            BlockAuthenticationScheme::Ed25519
+        );
+        let parameters: NodeParameters =
+            serde_yaml::from_str("block_authentication: ml-dsa-65").unwrap();
+        assert_eq!(
+            parameters.block_authentication,
+            BlockAuthenticationScheme::MlDsa65
+        );
+        assert!(serde_yaml::from_str::<NodeParameters>("block_authentication: rsa").is_err());
+        let yaml = serde_yaml::to_string(&parameters).unwrap();
+        assert!(yaml.contains("block_authentication: ml-dsa-65"), "{yaml}");
+    }
+
+    #[test]
+    fn private_config_yaml_round_trips_post_quantum_keys() {
+        let dir = TempDir::new().unwrap();
+        let scheme = BlockAuthenticationScheme::MlDsa87;
+        let configs =
+            NodePrivateConfig::new_for_benchmarks_with_authentication(dir.as_ref(), 4, scheme);
+        for (authority, config) in configs.iter().enumerate() {
+            let key = config
+                .block_signing_key(scheme)
+                .expect("key for selected scheme");
+            assert!(
+                config
+                    .block_signing_key(BlockAuthenticationScheme::MlDsa44)
+                    .is_none()
+            );
+            let yaml = serde_yaml::to_string(config).unwrap();
+            let decoded: NodePrivateConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(decoded.authority, authority as AuthorityIndex);
+            assert_eq!(
+                decoded.block_signing_key(scheme).unwrap().public_key(),
+                key.public_key()
+            );
+            assert_eq!(decoded.keypair.public_key(), config.keypair.public_key());
+        }
+
+        // Ed25519-only configs keep the legacy layout and load without the field.
+        let legacy = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), 1).remove(0);
+        let yaml = serde_yaml::to_string(&legacy).unwrap();
+        assert!(!yaml.contains("pq_keypairs"));
+        let decoded: NodePrivateConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(decoded.pq_keypairs.is_empty());
+    }
+}

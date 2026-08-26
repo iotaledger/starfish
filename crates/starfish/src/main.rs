@@ -19,6 +19,7 @@ use eyre::{Context, Result};
 use prettytable::format;
 use starfish_core::{
     ByzantineStrategy,
+    block_authentication::BlockAuthenticationScheme,
     committee::Committee,
     config::{
         DisseminationMode, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig,
@@ -50,6 +51,10 @@ enum Operation {
         working_directory: PathBuf,
         #[clap(long, value_name = "FILE")]
         node_parameters_path: Option<PathBuf>,
+        /// Block signature scheme to generate key material for. Overrides
+        /// `block_authentication` from the node parameters file.
+        #[clap(long, value_name = "SCHEME")]
+        block_authentication: Option<BlockAuthenticationScheme>,
     },
     /// Run a validator node.
     Run {
@@ -67,6 +72,11 @@ enum Operation {
         byzantine_strategy: String,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme (ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87
+        /// | slh-dsa-sha2-{128,192,256}{s,f}). Overrides the public
+        /// config.
+        #[clap(long, value_name = "SCHEME")]
+        block_authentication: Option<BlockAuthenticationScheme>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -95,6 +105,10 @@ enum Operation {
         adversarial_latency_percent: u32,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme (ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87
+        /// | slh-dsa-sha2-{128,192,256}{s,f}). Default: ed25519.
+        #[clap(long, value_name = "SCHEME")]
+        block_authentication: Option<BlockAuthenticationScheme>,
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
@@ -145,6 +159,10 @@ enum Operation {
         adversarial_latency_percent: u32,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme (ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87
+        /// | slh-dsa-sha2-{128,192,256}{s,f}). Default: ed25519.
+        #[clap(long, value_name = "SCHEME")]
+        block_authentication: Option<BlockAuthenticationScheme>,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
         /// Dissemination mode override:
@@ -169,7 +187,13 @@ async fn main() -> Result<()> {
             ips,
             working_directory,
             node_parameters_path,
-        } => benchmark_genesis(ips, working_directory, node_parameters_path)?,
+            block_authentication,
+        } => benchmark_genesis(
+            ips,
+            working_directory,
+            node_parameters_path,
+            block_authentication,
+        )?,
         Operation::Run {
             authority,
             committee_path,
@@ -178,6 +202,7 @@ async fn main() -> Result<()> {
             parameters_path,
             byzantine_strategy,
             consensus: consensus_protocol,
+            block_authentication,
         } => {
             run(
                 authority,
@@ -187,6 +212,7 @@ async fn main() -> Result<()> {
                 parameters_path,
                 byzantine_strategy,
                 consensus_protocol,
+                block_authentication,
             )
             .await?
         }
@@ -200,6 +226,7 @@ async fn main() -> Result<()> {
             adversarial_latency,
             adversarial_latency_percent,
             consensus: consensus_protocol,
+            block_authentication,
             data_dir,
             base_ip,
             storage_backend,
@@ -218,6 +245,7 @@ async fn main() -> Result<()> {
                 adversarial_latency,
                 adversarial_latency_percent,
                 consensus_protocol,
+                block_authentication.unwrap_or_default(),
                 data_dir,
                 base_ip,
                 storage_backend,
@@ -238,6 +266,7 @@ async fn main() -> Result<()> {
             adversarial_latency,
             adversarial_latency_percent,
             consensus: consensus_protocol,
+            block_authentication,
             duration_secs,
             dissemination_mode,
         } => {
@@ -247,6 +276,7 @@ async fn main() -> Result<()> {
             }
             node_parameters.adversarial_latency = adversarial_latency;
             node_parameters.adversarial_latency_percent = adversarial_latency_percent;
+            node_parameters.block_authentication = block_authentication.unwrap_or_default();
             if let Some(ref mode) = dissemination_mode {
                 node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
@@ -270,6 +300,7 @@ fn benchmark_genesis(
     ips: Vec<IpAddr>,
     working_directory: PathBuf,
     node_parameters_path: Option<PathBuf>,
+    block_authentication: Option<BlockAuthenticationScheme>,
 ) -> Result<()> {
     tracing::info!("Generating benchmark genesis files");
     fs::create_dir_all(&working_directory).wrap_err(format!(
@@ -277,23 +308,31 @@ fn benchmark_genesis(
         working_directory.display()
     ))?;
 
-    // Generate the committee file.
-    let committee_size = ips.len();
-    let mut committee_path = working_directory.clone();
-    committee_path.push(Committee::DEFAULT_FILENAME);
-    Committee::new_for_benchmarks(committee_size)
-        .print(&committee_path)
-        .wrap_err("Failed to print committee file")?;
-    tracing::info!("Generated committee file: {}", committee_path.display());
-
-    // Generate the public node config file.
-    let node_parameters = match node_parameters_path {
+    // Load the node parameters first: they select the block-authentication
+    // scheme whose key material the committee and private configs must carry.
+    let mut node_parameters = match node_parameters_path {
         Some(path) => NodeParameters::load(&path).wrap_err(format!(
             "Failed to load parameters file '{}'",
             path.display()
         ))?,
         None => NodeParameters::default(),
     };
+    if let Some(scheme) = block_authentication {
+        node_parameters.block_authentication = scheme;
+    }
+    let block_authentication = node_parameters.block_authentication;
+    tracing::info!("Block authentication scheme: {block_authentication}");
+
+    // Generate the committee file.
+    let committee_size = ips.len();
+    let mut committee_path = working_directory.clone();
+    committee_path.push(Committee::DEFAULT_FILENAME);
+    Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication)
+        .print(&committee_path)
+        .wrap_err("Failed to print committee file")?;
+    tracing::info!("Generated committee file: {}", committee_path.display());
+
+    // Generate the public node config file.
 
     let node_public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
     let mut node_public_config_path = working_directory.clone();
@@ -307,8 +346,11 @@ fn benchmark_genesis(
     );
 
     // Generate the private node config files.
-    let node_private_configs =
-        NodePrivateConfig::new_for_benchmarks(&working_directory, committee_size);
+    let node_private_configs = NodePrivateConfig::new_for_benchmarks_with_authentication(
+        &working_directory,
+        committee_size,
+        block_authentication,
+    );
     for (i, private_config) in node_private_configs.into_iter().enumerate() {
         fs::create_dir_all(&private_config.storage_path)
             .expect("Failed to create storage directory");
@@ -339,6 +381,10 @@ async fn local_benchmark(
     }
     println!("Transaction Load: {load} tx/s");
     println!("Consensus Protocol: {consensus_protocol}");
+    println!(
+        "Block Authentication: {}",
+        node_parameters.block_authentication
+    );
     if let Some(latency) = node_parameters.uniform_latency_ms {
         println!("Network Latency: {latency} ms (uniform)");
     } else {
@@ -362,7 +408,9 @@ async fn local_benchmark(
     println!("Duration: {duration_secs} seconds");
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
-    let committee = Committee::new_for_benchmarks(committee_size);
+    let block_authentication = node_parameters.block_authentication;
+    let committee =
+        Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     load /= committee.len();
     let parameters = Parameters::almost_default(load);
     // Equivocating Byzantine strategies must not generate transactions.
@@ -410,8 +458,11 @@ async fn local_benchmark(
                 ));
             }
         }
-        let mut private_configs =
-            NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
+        let mut private_configs = NodePrivateConfig::new_for_benchmarks_with_authentication(
+            &working_dir,
+            committee_size,
+            block_authentication,
+        );
         let private_config = private_configs.remove(authority);
         match fs::create_dir_all(&private_config.storage_path) {
             Ok(_) => {}
@@ -511,14 +562,18 @@ async fn run(
     parameters_path: String,
     byzantine_strategy: String,
     consensus_protocol: String,
+    block_authentication: Option<BlockAuthenticationScheme>,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
     let committee = Committee::load(&committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
-    let public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
+    let mut public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
         "Failed to load parameters file '{public_config_path}'"
     ))?;
+    if let Some(scheme) = block_authentication {
+        public_config.parameters.block_authentication = scheme;
+    }
     let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{private_config_path}'"
     ))?;
@@ -555,6 +610,7 @@ async fn dryrun(
     adversarial_latency: bool,
     adversarial_latency_percent: u32,
     consensus_protocol: String,
+    block_authentication: BlockAuthenticationScheme,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
     storage_backend: Option<String>,
@@ -571,7 +627,8 @@ async fn dryrun(
         Some(_) => eyre::bail!("--base-ip must be an IPv4 address"),
         None => vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size],
     };
-    let committee = Committee::new_for_benchmarks(committee_size);
+    let committee =
+        Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     let mut parameters = Parameters::almost_default(load);
     if let Some(ref backend) = storage_backend {
         parameters.storage_backend = match backend.as_str() {
@@ -596,6 +653,7 @@ async fn dryrun(
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
+    node_parameters.block_authentication = block_authentication;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -606,8 +664,11 @@ async fn dryrun(
 
     let base = data_dir.unwrap_or_default();
     let working_dir = base.join(format!("dryrun-node-{authority}"));
-    let mut all_private_config =
-        NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
+    let mut all_private_config = NodePrivateConfig::new_for_benchmarks_with_authentication(
+        &working_dir,
+        committee_size,
+        block_authentication,
+    );
     let private_config = all_private_config.remove(authority as usize);
     match fs::remove_dir_all(&working_dir) {
         Ok(_) => {}
@@ -704,7 +765,63 @@ pub fn default_table_format() -> format::TableFormat {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use super::ipv4_add_offset;
+    use clap::Parser;
+    use starfish_core::block_authentication::BlockAuthenticationScheme;
+
+    use super::{Args, Operation, ipv4_add_offset};
+
+    #[test]
+    fn block_authentication_is_parsed_independently_of_consensus() {
+        let args = Args::try_parse_from([
+            "starfish",
+            "local-benchmark",
+            "--committee-size",
+            "4",
+            "--consensus",
+            "mysticeti",
+            "--block-authentication",
+            "slh-dsa-sha2-128f",
+        ])
+        .unwrap();
+        let Operation::LocalBenchmark {
+            consensus,
+            block_authentication,
+            ..
+        } = args.operation
+        else {
+            panic!("expected local-benchmark");
+        };
+        assert_eq!(consensus, "mysticeti");
+        assert_eq!(
+            block_authentication,
+            Some(BlockAuthenticationScheme::SlhDsaSha2_128f)
+        );
+
+        let args =
+            Args::try_parse_from(["starfish", "local-benchmark", "--committee-size", "4"]).unwrap();
+        let Operation::LocalBenchmark {
+            block_authentication,
+            ..
+        } = args.operation
+        else {
+            panic!("expected local-benchmark");
+        };
+        assert_eq!(block_authentication, None);
+
+        assert!(
+            Args::try_parse_from([
+                "starfish",
+                "dry-run",
+                "--authority",
+                "0",
+                "--committee-size",
+                "4",
+                "--block-authentication",
+                "rsa",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn ipv4_add_offset_crosses_octet_boundary() {

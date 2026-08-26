@@ -21,7 +21,7 @@ use settings::{CloudProvider, Settings};
 use ssh::{CommandContext, SshConnectionManager};
 use testbed::Testbed;
 
-use starfish_core::config::DisseminationMode;
+use starfish_core::{block_authentication::BlockAuthenticationScheme, config::DisseminationMode};
 
 mod benchmark;
 mod client;
@@ -57,6 +57,13 @@ pub struct Opts {
         global = true
     )]
     settings_path: String,
+
+    /// Block signature scheme used by every benchmarked consensus protocol
+    /// (ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87 |
+    /// slh-dsa-sha2-{128,192,256}{s,f}). Defaults to the node parameters
+    /// file, which defaults to ed25519.
+    #[clap(long, value_name = "SCHEME", global = true)]
+    block_authentication: Option<BlockAuthenticationScheme>,
 
     /// The type of operation to run.
     #[clap(subcommand)]
@@ -847,6 +854,7 @@ fn load_benchmark_configs(
     dissemination_mode: &Option<String>,
     compress_network: Option<bool>,
     bls_workers: Option<usize>,
+    block_authentication: Option<BlockAuthenticationScheme>,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
@@ -854,6 +862,9 @@ fn load_benchmark_configs(
     };
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
+    if let Some(scheme) = block_authentication {
+        node_parameters.block_authentication = scheme;
+    }
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -1033,6 +1044,7 @@ async fn run<C: ServerProviderClient>(
         .await
         .wrap_err("Failed to crate testbed")?;
 
+    let block_authentication = opts.block_authentication;
     match opts.operation {
         Operation::Testbed { action } => match action {
             // Display the current status of the testbed.
@@ -1229,6 +1241,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                block_authentication,
             )?;
 
             display::newline();
@@ -1395,6 +1408,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                block_authentication,
             )?;
 
             display::newline();
@@ -1601,6 +1615,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                block_authentication,
             )?;
 
             display::newline();
@@ -1766,6 +1781,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                block_authentication,
             )?;
 
             display::newline();
@@ -1971,6 +1987,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                block_authentication,
             )?;
 
             display::newline();
@@ -2267,7 +2284,7 @@ async fn run<C: ServerProviderClient>(
 mod tests {
     use clap::Parser;
 
-    use super::{Operation, Opts, auto_bls_workers_for_vcpus};
+    use super::{BlockAuthenticationScheme, Operation, Opts, auto_bls_workers_for_vcpus};
 
     #[test]
     fn benchmark_requires_protocols() {
@@ -2303,6 +2320,26 @@ mod tests {
             }
             other => panic!("unexpected operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_authentication_is_a_global_option() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark",
+            "--block-authentication",
+            "ml-dsa-65",
+            "--protocols",
+            "starfish",
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.block_authentication,
+            Some(BlockAuthenticationScheme::MlDsa65)
+        );
+        let opts =
+            Opts::try_parse_from(["orchestrator", "benchmark", "--protocols", "starfish"]).unwrap();
+        assert_eq!(opts.block_authentication, None);
     }
 
     #[test]

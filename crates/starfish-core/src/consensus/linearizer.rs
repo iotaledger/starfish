@@ -446,8 +446,8 @@ impl fmt::Debug for CommittedSubDag {
 mod tests {
     use super::*;
     use crate::{
+        block_authentication::{BlockAuthentication, BlockAuthenticationScheme},
         config::{DisseminationMode, StorageBackend},
-        crypto::SignatureBytes,
         dag_state::DataSource,
         metrics::Metrics,
         types::AuthoritySet,
@@ -470,6 +470,7 @@ mod tests {
             committee.clone(),
             "honest".to_string(),
             consensus.to_string(),
+            BlockAuthenticationScheme::Ed25519,
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,
@@ -491,7 +492,7 @@ mod tests {
             parents,
             acks,
             0,
-            SignatureBytes::default(),
+            BlockAuthentication::None,
             Vec::new(),
             None,
             strong_vote,

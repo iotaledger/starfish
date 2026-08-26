@@ -9,6 +9,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    block_authentication::{
+        BlockAuthenticationScheme, BlockPublicKey, BlockSigningKey, benchmark_seed,
+    },
     config::ImportExport,
     crypto::{BlsPublicKey, BlsSigner, PublicKey, Signer, dummy_bls_public_key, dummy_public_key},
     data::Data,
@@ -55,6 +58,18 @@ impl Committee {
             info.bls_public_key().validate().unwrap_or_else(|e| {
                 panic!("Invalid BLS public key for authority {authority}: {e:?}")
             });
+            let mut schemes: Vec<_> = info
+                .pq_public_keys
+                .iter()
+                .map(BlockPublicKey::scheme)
+                .collect();
+            schemes.sort_by_key(|scheme| scheme.name());
+            schemes.dedup();
+            assert_eq!(
+                schemes.len(),
+                info.pq_public_keys.len(),
+                "Authority {authority} lists more than one public key for the same scheme"
+            );
         }
         use crate::types::MAX_COMMITTEE_SIZE;
         assert!(
@@ -137,6 +152,28 @@ impl Committee {
             .map(Authority::public_key)
     }
 
+    /// Post-quantum public key of `authority` for `scheme`, if the committee
+    /// file carries one. Always `None` for Ed25519, which uses
+    /// [`Self::get_public_key`].
+    pub fn block_public_key(
+        &self,
+        authority: AuthorityIndex,
+        scheme: BlockAuthenticationScheme,
+    ) -> Option<&BlockPublicKey> {
+        self.authorities
+            .get(authority as usize)
+            .and_then(|info| info.pq_public_key(scheme))
+    }
+
+    /// `true` iff every authority can be verified under `scheme`.
+    pub fn supports_block_authentication(&self, scheme: BlockAuthenticationScheme) -> bool {
+        !scheme.is_post_quantum()
+            || self
+                .authorities
+                .iter()
+                .all(|info| info.pq_public_key(scheme).is_some())
+    }
+
     pub fn get_bls_public_key(&self, authority: AuthorityIndex) -> Option<&BlsPublicKey> {
         self.authorities
             .get(authority as usize)
@@ -204,16 +241,37 @@ impl Committee {
     }
 
     pub fn new_for_benchmarks(committee_size: usize) -> Arc<Self> {
+        Self::new_for_benchmarks_with_authentication(
+            committee_size,
+            BlockAuthenticationScheme::Ed25519,
+        )
+    }
+
+    /// Benchmark committee whose members additionally carry the public key of
+    /// `block_authentication`, derived from the same deterministic seeds as
+    /// [`crate::config::NodePrivateConfig::new_for_benchmarks_with_authentication`].
+    pub fn new_for_benchmarks_with_authentication(
+        committee_size: usize,
+        block_authentication: BlockAuthenticationScheme,
+    ) -> Arc<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
         Self::new(
             signers
                 .into_iter()
                 .zip(bls_signers)
-                .map(|(keypair, bls_keypair)| Authority {
+                .enumerate()
+                .map(|(authority, (keypair, bls_keypair))| Authority {
                     stake: 1,
                     public_key: keypair.public_key(),
                     bls_public_key: bls_keypair.public_key(),
+                    pq_public_keys: BlockSigningKey::from_seed(
+                        block_authentication,
+                        &benchmark_seed(block_authentication, authority as u64),
+                    )
+                    .map(|key| key.public_key())
+                    .into_iter()
+                    .collect(),
                 })
                 .collect(),
         )
@@ -225,6 +283,10 @@ pub struct Authority {
     stake: Stake,
     public_key: PublicKey,
     bls_public_key: BlsPublicKey,
+    /// Post-quantum block-authentication keys, at most one per scheme. Empty
+    /// for committees that only run Ed25519.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pq_public_keys: Vec<BlockPublicKey>,
 }
 
 impl Authority {
@@ -233,7 +295,14 @@ impl Authority {
             stake,
             public_key: dummy_public_key(),
             bls_public_key: dummy_bls_public_key(),
+            pq_public_keys: Vec::new(),
         }
+    }
+
+    pub fn pq_public_key(&self, scheme: BlockAuthenticationScheme) -> Option<&BlockPublicKey> {
+        self.pq_public_keys
+            .iter()
+            .find(|key| key.scheme() == scheme)
     }
 
     pub fn stake(&self) -> Stake {
@@ -325,6 +394,44 @@ pub enum TransactionVoteResult {
 #[cfg(test)]
 mod tests {
     use super::Committee;
+    use super::{BlockAuthenticationScheme, BlockSigningKey, benchmark_seed};
+
+    #[test]
+    fn committee_yaml_round_trips_post_quantum_keys_and_accepts_legacy_files() {
+        let ed_only = Committee::new_for_benchmarks(4);
+        let yaml = serde_yaml::to_string(&*ed_only).unwrap();
+        assert!(
+            !yaml.contains("pq_public_keys"),
+            "legacy layout must stay unchanged"
+        );
+        let decoded: Committee = serde_yaml::from_str(&yaml).unwrap();
+        assert!(decoded.supports_block_authentication(BlockAuthenticationScheme::Ed25519));
+        assert!(!decoded.supports_block_authentication(BlockAuthenticationScheme::MlDsa44));
+        assert!(
+            decoded
+                .block_public_key(0, BlockAuthenticationScheme::MlDsa44)
+                .is_none()
+        );
+
+        let scheme = BlockAuthenticationScheme::SlhDsaSha2_128f;
+        let committee = Committee::new_for_benchmarks_with_authentication(4, scheme);
+        let yaml = serde_yaml::to_string(&*committee).unwrap();
+        assert!(yaml.contains("slh-dsa-sha2-128f"));
+        let decoded: Committee = serde_yaml::from_str(&yaml).unwrap();
+        assert!(decoded.supports_block_authentication(scheme));
+        assert!(!decoded.supports_block_authentication(BlockAuthenticationScheme::MlDsa44));
+        for authority in committee.authorities() {
+            let expected =
+                BlockSigningKey::from_seed(scheme, &benchmark_seed(scheme, authority as u64))
+                    .unwrap()
+                    .public_key();
+            assert_eq!(decoded.block_public_key(authority, scheme), Some(&expected));
+            assert_eq!(
+                committee.block_public_key(authority, scheme),
+                Some(&expected)
+            );
+        }
+    }
 
     #[test]
     fn authorities_and_known_authority_support_more_than_255() {

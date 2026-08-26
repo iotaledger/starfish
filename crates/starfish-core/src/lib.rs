@@ -2,6 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod block_authentication;
 pub mod block_handler;
 mod block_manager;
 pub mod bls_batch_verifier;
