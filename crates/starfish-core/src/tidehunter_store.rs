@@ -4,7 +4,6 @@
 use std::{io, path::Path, sync::Arc};
 
 use bytes::Bytes;
-
 use tidehunter::{
     config::Config,
     db::Db,
@@ -17,7 +16,12 @@ use crate::{
     data::Data,
     store::Store,
     types::{
-        BlockHeader, BlockReference, ProvableShard, RoundNumber, TransactionData, VerifiedBlock,
+        BlockHeader,
+        BlockReference,
+        ProvableShard,
+        RoundNumber,
+        TransactionData,
+        VerifiedBlock,
     },
 };
 

@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block_authentication::{
-        BlockAuthenticationScheme, BlockPublicKey, BlockSigningKey, benchmark_seed,
+        BlockAuthenticationScheme,
+        BlockPublicKey,
+        BlockSigningKey,
+        benchmark_seed,
     },
     config::ImportExport,
     crypto::{BlsPublicKey, BlsSigner, PublicKey, Signer, dummy_bls_public_key, dummy_public_key},
@@ -393,8 +396,7 @@ pub enum TransactionVoteResult {
 
 #[cfg(test)]
 mod tests {
-    use super::Committee;
-    use super::{BlockAuthenticationScheme, BlockSigningKey, benchmark_seed};
+    use super::{BlockAuthenticationScheme, BlockSigningKey, Committee, benchmark_seed};
 
     #[test]
     fn committee_yaml_round_trips_post_quantum_keys_and_accepts_legacy_files() {
