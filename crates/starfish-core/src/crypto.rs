@@ -14,7 +14,12 @@ use crate::{
     committee::Committee,
     crypto,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, RoundNumber, Shard,
+        AuthorityIndex,
+        AuthoritySet,
+        BaseTransaction,
+        BlockReference,
+        RoundNumber,
+        Shard,
         TimestampNs,
     },
 };
@@ -982,8 +987,9 @@ pub fn dummy_bls_public_key() -> BlsPublicKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde::{Deserialize, Serialize};
+
+    use super::*;
 
     #[test]
     fn bls_sign_verify_roundtrip() {

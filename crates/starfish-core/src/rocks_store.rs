@@ -4,10 +4,15 @@
 use std::{io, path::Path, sync::Arc};
 
 use ahash::AHashSet;
-
 use bincode::{deserialize, serialize};
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, Options, ReadOptions,
+    BlockBasedOptions,
+    Cache,
+    ColumnFamilyDescriptor,
+    DB,
+    DBCompactionStyle,
+    Options,
+    ReadOptions,
     WriteOptions,
 };
 
@@ -17,7 +22,12 @@ use crate::{
     data::Data,
     store::Store,
     types::{
-        BlockHeader, BlockReference, ProvableShard, RoundNumber, TransactionData, VerifiedBlock,
+        BlockHeader,
+        BlockReference,
+        ProvableShard,
+        RoundNumber,
+        TransactionData,
+        VerifiedBlock,
     },
 };
 
