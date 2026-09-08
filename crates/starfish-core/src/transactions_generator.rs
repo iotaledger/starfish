@@ -65,10 +65,9 @@ impl TransactionGenerator {
         // Add a small extra delay proportional to committee size to give
         // connections time to come up. Calibrated so n=100 lands at ~15s
         // total when initial_delay is the 10s default.
-        let initial_delay_plus_extra_delay = self.parameters.initial_delay
-            + Duration::from_millis(
-                (self.node_public_config.identifiers.len() as f64 / 100.0 * 5000.0) as u64,
-            );
+        let initial_delay_plus_extra_delay = self
+            .parameters
+            .warmup_delay(self.node_public_config.identifiers.len());
         let benchmark_duration = self.parameters.benchmark_duration;
 
         // When the orchestrator sets a finite benchmark window, gate metrics
@@ -135,8 +134,12 @@ impl TransactionGenerator {
                     );
                     // Close the active metrics window so commits arriving
                     // during the wind-down don't pollute cumulative
-                    // quantiles or skew the TPS denominator.
-                    self.metrics.metrics_active.store(false, Ordering::Relaxed);
+                    // quantiles or skew the TPS denominator, unless the
+                    // caller wants the drain counted (committed-fraction
+                    // measurements in the local benchmark).
+                    if !self.parameters.keep_metrics_open_after_generation {
+                        self.metrics.metrics_active.store(false, Ordering::Relaxed);
+                    }
                     break;
                 }
             }
@@ -182,12 +185,15 @@ impl TransactionGenerator {
                 return;
             }
 
-            if counter.is_multiple_of(10_000) {
+            // Flush the submitted counters every interval so the totals are
+            // exact at any point (committed-fraction measurements compare
+            // sequenced against submitted at the end of a run).
+            if tx_to_report > 0 {
                 self.metrics
                     .submitted_transactions_bytes
                     .inc_by(tx_to_report * tx_size as u64);
                 self.metrics.submitted_transactions.inc_by(tx_to_report);
-                tx_to_report = 0
+                tx_to_report = 0;
             }
         }
     }

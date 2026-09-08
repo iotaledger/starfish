@@ -190,6 +190,18 @@ enum Operation {
         /// generate no transactions.
         #[clap(long, value_name = "FLOAT", default_value_t = 1.0)]
         byzantine_load_multiplier: f64,
+        /// Generate transactions for exactly this many seconds after the
+        /// warmup, then stop and drain. When set, the run lasts
+        /// warmup + generation + drain and `--duration-secs` is ignored;
+        /// throughput divides by the generation window and the summary
+        /// reports the fraction of submitted honest transactions that were
+        /// eventually committed.
+        #[clap(long, value_name = "INT")]
+        generation_secs: Option<u64>,
+        /// Seconds to keep running after generation stops (only with
+        /// `--generation-secs`), so the backlog can commit.
+        #[clap(long, value_name = "INT", default_value_t = 0)]
+        drain_secs: u64,
     },
 }
 
@@ -297,6 +309,8 @@ async fn main() -> Result<()> {
             uplink_limit_mbps,
             leader_timeout_ms,
             byzantine_load_multiplier,
+            generation_secs,
+            drain_secs,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
             node_parameters.uplink_limit_mbps = uplink_limit_mbps;
@@ -319,6 +333,8 @@ async fn main() -> Result<()> {
                 duration_secs,
                 leader_timeout_ms,
                 byzantine_load_multiplier,
+                generation_secs,
+                drain_secs,
             )
             .await?;
         }
@@ -405,6 +421,8 @@ async fn local_benchmark(
     duration_secs: u64,
     leader_timeout_ms: Option<u64>,
     byzantine_load_multiplier: f64,
+    generation_secs: Option<u64>,
+    drain_secs: u64,
 ) -> Result<()> {
     println!("\n=== Benchmark Configuration ===");
     println!("Committee Size: {committee_size}");
@@ -447,8 +465,6 @@ async fn local_benchmark(
         Some(mbps) => println!("Uplink Limit: {mbps} Mbit/s per node (emulated)"),
         None => println!("Uplink Limit: none"),
     }
-    println!("Duration: {duration_secs} seconds");
-    println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let block_authentication = node_parameters.block_authentication;
     let committee =
@@ -456,6 +472,26 @@ async fn local_benchmark(
     load /= committee.len();
     let mut parameters = Parameters::almost_default(load);
     parameters.leader_timeout = leader_timeout_ms.map(Duration::from_millis);
+    // With an explicit generation window the run is warmup + generation +
+    // drain, throughput divides by the generation window only, and commits
+    // during the drain still count (committed-fraction measurement).
+    let warmup_secs = parameters.warmup_delay(committee_size).as_secs();
+    let (run_secs, report_secs) = match generation_secs {
+        Some(generation) => {
+            parameters.benchmark_duration = Some(Duration::from_secs(generation));
+            parameters.keep_metrics_open_after_generation = true;
+            println!(
+                "Run: {warmup_secs} s warmup + {generation} s generation + {drain_secs} s drain"
+            );
+            (warmup_secs + generation + drain_secs, generation)
+        }
+        None => {
+            println!("Duration: {duration_secs} seconds (cumulative window after warmup)");
+            (duration_secs, duration_secs)
+        }
+    };
+    println!("===========================\n");
+    let duration_secs = run_secs;
     // Equivocating Byzantine strategies must not generate transactions.
     let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
         .is_some_and(|s| s.is_equivocating())
@@ -576,7 +612,7 @@ async fn local_benchmark(
             Metrics::aggregate_and_display(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
-                duration_secs,
+                report_secs,
                 &byzantine_authorities,
             );
 
@@ -600,7 +636,7 @@ async fn local_benchmark(
             Metrics::aggregate_and_display(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
-                duration_secs,
+                report_secs,
                 &byzantine_authorities,
             );
             fs::remove_dir_all(base_dir)?;

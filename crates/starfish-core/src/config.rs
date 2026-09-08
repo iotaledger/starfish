@@ -449,6 +449,12 @@ pub struct Parameters {
     /// have time to commit the in-flight queue before being torn down.
     #[serde(default)]
     pub benchmark_duration: Option<Duration>,
+    /// Keep the metrics window open after the generator stops, so commits
+    /// during the drain still count toward the sequenced totals and the
+    /// latency distribution. The local benchmark sets this to measure the
+    /// eventually committed fraction of submitted transactions.
+    #[serde(default)]
+    pub keep_metrics_open_after_generation: bool,
 }
 
 impl Parameters {
@@ -459,6 +465,14 @@ impl Parameters {
             load,
             ..Self::default()
         }
+    }
+
+    /// Delay before the transaction generator starts submitting: the
+    /// configured initial delay plus a committee-size-proportional allowance
+    /// for connections to come up (calibrated so n=100 lands at ~15 s with
+    /// the 10 s default).
+    pub fn warmup_delay(&self, committee_size: usize) -> Duration {
+        self.initial_delay + Duration::from_millis((committee_size as f64 / 100.0 * 5000.0) as u64)
     }
 }
 
@@ -504,6 +518,7 @@ impl Default for Parameters {
             leader_timeout: None,
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
             benchmark_duration: None,
+            keep_metrics_open_after_generation: false,
         }
     }
 }

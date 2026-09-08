@@ -1005,9 +1005,18 @@ impl Metrics {
             })
             .sum::<u64>()
             / num_validators;
-        let average_honest_tps =
-            average_transactions.saturating_sub(average_byzantine_author_transactions) as f64
-                / duration_secs as f64;
+        let average_honest_transactions =
+            average_transactions.saturating_sub(average_byzantine_author_transactions);
+        let average_honest_tps = average_honest_transactions as f64 / duration_secs as f64;
+        // Transactions submitted by the honest validators whose metrics are
+        // aggregated here; the committed fraction compares what one honest
+        // validator sequenced from honest authors against that total.
+        let honest_submitted: u64 = metrics.iter().map(|m| m.submitted_transactions.get()).sum();
+        let honest_committed_fraction = if honest_submitted > 0 {
+            average_honest_transactions as f64 / honest_submitted as f64 * 100.0
+        } else {
+            0.0
+        };
         let average_uplink_wait_secs: f64 = metrics
             .iter()
             .map(|m| m.uplink_throttle_wait_micros_total.get())
@@ -1132,6 +1141,11 @@ impl Metrics {
         table.add_row(row![
             b->"Average honest-author TPS:",
             format!("{:.2} tx/s", average_honest_tps)
+        ]);
+        table.add_row(row![b->"Honest transactions submitted:", honest_submitted]);
+        table.add_row(row![
+            b->"Honest committed fraction:",
+            format!("{:.2} %", honest_committed_fraction)
         ]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
 
