@@ -132,6 +132,14 @@ enum Operation {
         /// Number of parallel threads for BLS batch verification (default: 5).
         #[clap(long, value_name = "INT")]
         bls_workers: Option<usize>,
+        /// Emulated outbound bandwidth cap per node, in Mbit/s (unset:
+        /// unlimited).
+        #[clap(long, value_name = "FLOAT")]
+        uplink_limit_mbps: Option<f64>,
+        /// Explicit leader timeout in milliseconds; unset uses the protocol
+        /// default (2Δ for Push, 8Δ for Lazy-Push pacemakers).
+        #[clap(long, value_name = "INT")]
+        leader_timeout_ms: Option<u64>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -169,6 +177,14 @@ enum Operation {
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING")]
         dissemination_mode: Option<String>,
+        /// Emulated outbound bandwidth cap per node, in Mbit/s (unset:
+        /// unlimited).
+        #[clap(long, value_name = "FLOAT")]
+        uplink_limit_mbps: Option<f64>,
+        /// Explicit leader timeout in milliseconds for all nodes; unset uses
+        /// each protocol's default (2Δ for Push, 8Δ for Lazy-Push pacemakers).
+        #[clap(long, value_name = "INT")]
+        leader_timeout_ms: Option<u64>,
     },
 }
 
@@ -234,6 +250,8 @@ async fn main() -> Result<()> {
             dissemination_mode,
             compress_network,
             bls_workers,
+            uplink_limit_mbps,
+            leader_timeout_ms,
         } => {
             dryrun(
                 authority,
@@ -253,6 +271,8 @@ async fn main() -> Result<()> {
                 dissemination_mode,
                 compress_network,
                 bls_workers,
+                uplink_limit_mbps,
+                leader_timeout_ms,
             )
             .await?
         }
@@ -269,8 +289,11 @@ async fn main() -> Result<()> {
             block_authentication,
             duration_secs,
             dissemination_mode,
+            uplink_limit_mbps,
+            leader_timeout_ms,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
+            node_parameters.uplink_limit_mbps = uplink_limit_mbps;
             if let Some(latency) = uniform_latency_ms {
                 node_parameters.uniform_latency_ms = Some(latency);
             }
@@ -288,6 +311,7 @@ async fn main() -> Result<()> {
                 node_parameters,
                 consensus_protocol,
                 duration_secs,
+                leader_timeout_ms,
             )
             .await?;
         }
@@ -372,6 +396,7 @@ async fn local_benchmark(
     node_parameters: NodeParameters,
     consensus_protocol: String,
     duration_secs: u64,
+    leader_timeout_ms: Option<u64>,
 ) -> Result<()> {
     println!("\n=== Benchmark Configuration ===");
     println!("Committee Size: {committee_size}");
@@ -405,6 +430,14 @@ async fn local_benchmark(
             node_parameters.adversarial_latency_percent
         );
     }
+    match leader_timeout_ms {
+        Some(ms) => println!("Leader Timeout: {ms} ms (explicit, all nodes)"),
+        None => println!("Leader Timeout: protocol default"),
+    }
+    match node_parameters.uplink_limit_mbps {
+        Some(mbps) => println!("Uplink Limit: {mbps} Mbit/s per node (emulated)"),
+        None => println!("Uplink Limit: none"),
+    }
     println!("Duration: {duration_secs} seconds");
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
@@ -412,15 +445,24 @@ async fn local_benchmark(
     let committee =
         Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     load /= committee.len();
-    let parameters = Parameters::almost_default(load);
+    let mut parameters = Parameters::almost_default(load);
+    parameters.leader_timeout = leader_timeout_ms.map(Duration::from_millis);
     // Equivocating Byzantine strategies must not generate transactions.
     let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
         .is_some_and(|s| s.is_equivocating())
     {
-        Parameters::almost_default(0)
+        Parameters {
+            load: 0,
+            ..parameters.clone()
+        }
     } else {
         parameters.clone()
     };
+    // Same placement rule as the validator start loop below.
+    let byzantine_authorities: Vec<AuthorityIndex> = (0..committee_size)
+        .filter(|a| a.is_multiple_of(3) && a / 3 < num_byzantine_nodes)
+        .map(|a| a as AuthorityIndex)
+        .collect();
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
 
     // Create temporary directories for each validator
@@ -523,6 +565,7 @@ async fn local_benchmark(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
                 duration_secs,
+                &byzantine_authorities,
             );
 
             // Abort all tasks
@@ -546,6 +589,7 @@ async fn local_benchmark(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
                 duration_secs,
+                &byzantine_authorities,
             );
             fs::remove_dir_all(base_dir)?;
             Ok(())
@@ -618,6 +662,8 @@ async fn dryrun(
     dissemination_mode: Option<String>,
     compress_network: bool,
     bls_workers: Option<usize>,
+    uplink_limit_mbps: Option<f64>,
+    leader_timeout_ms: Option<u64>,
 ) -> Result<()> {
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
@@ -630,6 +676,7 @@ async fn dryrun(
     let committee =
         Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     let mut parameters = Parameters::almost_default(load);
+    parameters.leader_timeout = leader_timeout_ms.map(Duration::from_millis);
     if let Some(ref backend) = storage_backend {
         parameters.storage_backend = match backend.as_str() {
             "rocksdb" => StorageBackend::Rocksdb,
@@ -654,6 +701,7 @@ async fn dryrun(
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
     node_parameters.block_authentication = block_authentication;
+    node_parameters.uplink_limit_mbps = uplink_limit_mbps;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }

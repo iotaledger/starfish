@@ -134,6 +134,11 @@ impl RealCommitHandler {
         }
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.transactions() {
+            let author_label = block.authority().to_string();
+            let sequenced_by_author = self
+                .metrics
+                .sequenced_transactions_by_author
+                .with_label_values(&[author_label.as_str()]);
             for transaction in vec {
                 let BaseTransaction::Share(transaction) = transaction;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
@@ -144,6 +149,7 @@ impl RealCommitHandler {
                     .transaction_committed_latency_squared_micros
                     .inc_by(latency.as_micros().pow(2) as u64);
                 self.metrics.sequenced_transactions_total.inc();
+                sequenced_by_author.inc();
                 self.metrics
                     .sequenced_transactions_bytes
                     .inc_by(transaction.as_bytes().len() as u64);

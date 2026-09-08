@@ -8,6 +8,7 @@ use futures::{
     FutureExt,
     future::{Either, select, select_all},
 };
+use prometheus::IntCounter;
 use rand::{Rng, SeedableRng, prelude::ThreadRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -207,6 +208,50 @@ pub struct Network {
     server_task: JoinHandle<()>,
 }
 
+/// Node-wide outbound link model used to emulate a capped uplink.
+///
+/// The link is a FIFO that drains at `bytes_per_sec`: each message reserves
+/// `size / rate` of link time on a virtual clock shared by every connection
+/// of this node and waits until its transmission would have completed.
+/// Callers await the reservation before the mimicked propagation latency
+/// and the socket write, so transmission time precedes propagation as on a
+/// real interface. Waiting time is accumulated in
+/// `uplink_throttle_wait_micros_total`.
+pub struct UplinkLimiter {
+    bytes_per_sec: f64,
+    next_free: parking_lot::Mutex<Instant>,
+    throttle_wait_micros_total: IntCounter,
+}
+
+impl UplinkLimiter {
+    pub fn new(limit_mbps: f64, throttle_wait_micros_total: IntCounter) -> Self {
+        assert!(limit_mbps > 0.0, "uplink limit must be positive");
+        Self {
+            bytes_per_sec: limit_mbps * 1_000_000.0 / 8.0,
+            next_free: parking_lot::Mutex::new(Instant::now()),
+            throttle_wait_micros_total,
+        }
+    }
+
+    /// Reserve link time for `bytes` and wait until the transmission would
+    /// have finished on the emulated link.
+    pub async fn acquire(&self, bytes: usize) {
+        let now = Instant::now();
+        let wait = {
+            let mut next_free = self.next_free.lock();
+            let start = if *next_free > now { *next_free } else { now };
+            let finish = start + Duration::from_secs_f64(bytes as f64 / self.bytes_per_sec);
+            *next_free = finish;
+            finish.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            self.throttle_wait_micros_total
+                .inc_by(wait.as_micros() as u64);
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 pub struct Connection {
     pub peer_id: usize,
     pub sender: mpsc::Sender<NetworkMessage>,
@@ -255,6 +300,12 @@ impl Network {
             );
         }
         let (latency_table, scaled_mask) = generate_latency_table(addresses.len(), node_parameters);
+        let uplink = node_parameters.uplink_limit_mbps.map(|mbps| {
+            Arc::new(UplinkLimiter::new(
+                mbps,
+                metrics.uplink_throttle_wait_micros_total.clone(),
+            ))
+        });
         let server = {
             let socket = if local_addr.is_ipv4() {
                 TcpSocket::new_v4().unwrap()
@@ -290,6 +341,7 @@ impl Network {
                     extra_connection_latency: latency_table[id][our_id],
                     extra_connection_scaled: scaled_mask[id][our_id],
                     compress_network: node_parameters.compress_network,
+                    uplink: uplink.clone(),
                 }
                 .run(receiver),
             );
@@ -364,6 +416,7 @@ struct Worker {
     extra_connection_latency: f64,
     extra_connection_scaled: bool,
     compress_network: bool,
+    uplink: Option<Arc<UplinkLimiter>>,
 }
 
 struct WorkerConnection {
@@ -372,6 +425,7 @@ struct WorkerConnection {
     metrics: Arc<Metrics>,
     peer_id: usize,
     compress_network: bool,
+    uplink: Option<Arc<UplinkLimiter>>,
 }
 
 impl Worker {
@@ -473,6 +527,7 @@ impl Worker {
             metrics,
             peer_id,
             compress_network,
+            uplink,
         } = connection;
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
@@ -495,6 +550,7 @@ impl Worker {
             extra_connection_latency,
             extra_connection_scaled,
             compress_network,
+            uplink,
         )
         .boxed();
         let read_fut =
@@ -514,6 +570,7 @@ impl Worker {
         connection_latency: f64,
         connection_scaled: bool,
         compress_network: bool,
+        uplink: Option<Arc<UplinkLimiter>>,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
         let writer = Arc::new(Mutex::new(writer));
@@ -617,6 +674,9 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    if let Some(limiter) = &uplink {
+                        limiter.acquire(wire_bytes.len() + 4).await;
+                    }
 
                     match async {
                         let mut writer_guard = writer.lock().await;
@@ -665,6 +725,7 @@ impl Worker {
                 let latency =
                     generate_latency(effective_latency(connection_latency, connection_scaled));
                 let request_type = message.request_type();
+                let uplink = uplink.clone();
 
                 join_set.spawn(async move {
                     let serialized = bincode::serialize(&message).expect("Serialization failed");
@@ -674,6 +735,10 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    // Transmission on the emulated uplink, then propagation.
+                    if let Some(limiter) = &uplink {
+                        limiter.acquire(wire_bytes.len() + 4).await;
+                    }
                     tokio::time::sleep(latency).await;
 
                     match async {
@@ -800,6 +865,7 @@ impl Worker {
             metrics: self.metrics.clone(),
             peer_id: self.peer_id,
             compress_network: self.compress_network,
+            uplink: self.uplink.clone(),
         })
     }
 }

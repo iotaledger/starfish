@@ -69,6 +69,14 @@ pub struct NodeParameters {
     pub enable_strong_vote_adaptive_acknowledgments: bool,
     #[serde(default = "param_defaults::default_soft_block_timeout")]
     pub soft_block_timeout: Duration,
+    /// Optional node-wide outbound bandwidth cap in megabits per second.
+    /// When set, every wire message reserves `size / rate` of link time on a
+    /// virtual clock shared by all connections of the node before it is
+    /// written, so transmission is serialized at this rate and the mimicked
+    /// propagation latency applies afterwards. `None` leaves the uplink
+    /// unlimited (the historical behavior).
+    #[serde(default)]
+    pub uplink_limit_mbps: Option<f64>,
 }
 
 pub mod node_defaults {
@@ -137,6 +145,7 @@ impl Default for NodeParameters {
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
+            uplink_limit_mbps: None,
         }
     }
 }

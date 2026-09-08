@@ -44,6 +44,13 @@ pub struct Metrics {
     pub proposal_wait_time_total_us: IntCounter,
     pub sequenced_transactions_total: IntCounter,
     pub sequenced_transactions_bytes: IntCounter,
+    /// Sequenced transactions labelled by the authority that proposed the
+    /// block carrying them; lets honest-author goodput be separated from
+    /// Byzantine payload.
+    pub sequenced_transactions_by_author: IntCounterVec,
+    /// Cumulative time messages waited for the emulated uplink
+    /// (`NodeParameters::uplink_limit_mbps`), in microseconds.
+    pub uplink_throttle_wait_micros_total: IntCounter,
     pub sailfish_rbc_fast_total: IntCounter,
     pub sailfish_rbc_slow_total: IntCounter,
 
@@ -605,6 +612,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            sequenced_transactions_by_author: register_int_counter_vec_with_registry!(
+                "sequenced_transactions_by_author",
+                "Sequenced transactions by the authority that proposed them",
+                &["author"],
+                registry,
+            )
+            .unwrap(),
+            uplink_throttle_wait_micros_total: register_int_counter_with_registry!(
+                "uplink_throttle_wait_micros_total",
+                "Cumulative time messages waited for the emulated uplink (microseconds)",
+                registry,
+            )
+            .unwrap(),
             sailfish_rbc_fast_total: register_int_counter_with_registry!(
                 "sailfish_rbc_fast_total",
                 "Sailfish++ RBC certifications via fast path (echo quorum)",
@@ -956,6 +976,7 @@ impl Metrics {
         metrics: Vec<Arc<Metrics>>,
         reporters: Vec<Arc<MetricReporter>>,
         duration_secs: u64,
+        byzantine_authorities: &[AuthorityIndex],
     ) {
         let num_validators = metrics.len() as u64;
 
@@ -966,6 +987,33 @@ impl Metrics {
             .sum::<u64>()
             / num_validators;
         let average_tps = average_transactions as f64 / duration_secs as f64;
+        // Honest-author goodput: sequenced transactions minus those proposed
+        // by the known Byzantine authorities (only meaningful in benchmarks
+        // where that set is known).
+        let average_byzantine_author_transactions: u64 = metrics
+            .iter()
+            .map(|m| {
+                byzantine_authorities
+                    .iter()
+                    .map(|a| {
+                        let label = a.to_string();
+                        m.sequenced_transactions_by_author
+                            .with_label_values(&[label.as_str()])
+                            .get()
+                    })
+                    .sum::<u64>()
+            })
+            .sum::<u64>()
+            / num_validators;
+        let average_honest_tps =
+            average_transactions.saturating_sub(average_byzantine_author_transactions) as f64
+                / duration_secs as f64;
+        let average_uplink_wait_secs: f64 = metrics
+            .iter()
+            .map(|m| m.uplink_throttle_wait_micros_total.get())
+            .sum::<u64>() as f64
+            / num_validators as f64
+            / 1_000_000.0;
 
         let average_blocks_submitted = metrics
             .iter()
@@ -1039,6 +1087,20 @@ impl Metrics {
             .sum::<Duration>()
             .as_millis() as f64
             / num_validators as f64;
+        let p99_block_committed_latency = reporters
+            .iter()
+            .filter_map(|r| r.block_committed_latency.lock().histogram.pcts([990]))
+            .filter_map(|pcts| pcts.first().copied())
+            .sum::<Duration>()
+            .as_millis() as f64
+            / num_validators as f64;
+        let p99_transaction_committed_latency = reporters
+            .iter()
+            .filter_map(|r| r.transaction_committed_latency.lock().histogram.pcts([990]))
+            .filter_map(|pcts| pcts.first().copied())
+            .sum::<Duration>()
+            .as_millis() as f64
+            / num_validators as f64;
 
         let mut table = PrettyTable::new();
         table.set_format(default_table_format());
@@ -1058,7 +1120,19 @@ impl Metrics {
             b->"Average e2e latency:",
             format!("{:.2} millis", p50_transaction_committed_latency)
         ]);
+        table.add_row(row![
+            b->"Average block latency p99:",
+            format!("{:.2} millis", p99_block_committed_latency)
+        ]);
+        table.add_row(row![
+            b->"Average e2e latency p99:",
+            format!("{:.2} millis", p99_transaction_committed_latency)
+        ]);
         table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
+        table.add_row(row![
+            b->"Average honest-author TPS:",
+            format!("{:.2} tx/s", average_honest_tps)
+        ]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
 
         // Network metrics
@@ -1081,6 +1155,10 @@ impl Metrics {
             0.0
         };
         table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", bandwidth_efficiency)]);
+        table.add_row(row![
+            b->"Average uplink throttle wait:",
+            format!("{:.2} s", average_uplink_wait_secs)
+        ]);
 
         // Shard reconstruction metrics
         table.add_row(row![bH2->""]);

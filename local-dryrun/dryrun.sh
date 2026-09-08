@@ -31,6 +31,10 @@ TRANSACTION_MODE=${TRANSACTION_MODE:-random}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
 DISSEMINATION_MODE=${DISSEMINATION_MODE:-protocol-default}
+# Emulated per-node outbound bandwidth cap in Mbit/s (empty = unlimited).
+UPLINK_LIMIT_MBPS=${UPLINK_LIMIT_MBPS:-}
+# Explicit leader timeout in ms for all nodes (empty = protocol default).
+LEADER_TIMEOUT_MS=${LEADER_TIMEOUT_MS:-}
 # Enable lz4 network compression.
 # Auto-enabled for random transaction mode.
 # Set COMPRESS_NETWORK=1 or =0 to override.
@@ -575,6 +579,12 @@ EOH
         fi
         if [ "${COMPRESS_NETWORK:-0}" = 1 ]; then
             PARAM_FLAGS+=" --compress-network"
+        fi
+        if [ -n "${UPLINK_LIMIT_MBPS:-}" ]; then
+            PARAM_FLAGS+=" --uplink-limit-mbps $UPLINK_LIMIT_MBPS"
+        fi
+        if [ -n "${LEADER_TIMEOUT_MS:-}" ]; then
+            PARAM_FLAGS+=" --leader-timeout-ms $LEADER_TIMEOUT_MS"
         fi
         if [ -n "$BLOCK_AUTHENTICATION" ]; then
             PARAM_FLAGS+=" --block-authentication $BLOCK_AUTHENTICATION"
