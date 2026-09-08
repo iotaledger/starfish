@@ -588,6 +588,13 @@ async fn local_benchmark(
             .await?
         };
         if !is_byzantine {
+            // Report latencies of honest-author transactions and blocks only;
+            // Byzantine payload (if ever sequenced) carries its withholding
+            // delay and would bias the comparison between protocols that do
+            // and do not sequence it.
+            validator
+                .metrics()
+                .exclude_authors_from_latency(&byzantine_authorities);
             metrics_of_honest_validators.push(validator.metrics());
             reporters_of_honest_validators.push(validator.reporter())
         }

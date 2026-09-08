@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use ahash::AHashSet;
 use prettytable::{Table as PrettyTable, format, row};
 use prometheus::{
     Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
@@ -179,6 +180,11 @@ pub struct Metrics {
     /// committed counters, the `benchmark_duration` clock) is skipped, so
     /// reported TPS / BPS / p50 latency reflect only the steady-state window.
     pub metrics_active: Arc<AtomicBool>,
+    /// Authorities whose blocks and transactions are excluded from the
+    /// latency histograms (the local benchmark registers the Byzantine
+    /// authorities here, so reported latencies describe honest-author
+    /// transactions only). Sequenced-transaction counters are unaffected.
+    pub latency_excluded_authors: Arc<parking_lot::RwLock<AHashSet<AuthorityIndex>>>,
     /// Wall-clock instant the validator's metrics were first activated, in
     /// microseconds since `validator_start`. Used by the
     /// `benchmark_duration` Prometheus counter so its denominator counts
@@ -965,11 +971,20 @@ impl Metrics {
             // bound). The transaction generator overrides to false during
             // its warmup when the orchestrator sets a finite duration.
             metrics_active: Arc::new(AtomicBool::new(true)),
+            latency_excluded_authors: Arc::new(parking_lot::RwLock::new(AHashSet::default())),
             active_start_micros: Arc::new(AtomicU64::new(0)),
             validator_start: tokio::time::Instant::now(),
         };
 
         (Arc::new(metrics), Arc::new(reporter))
+    }
+
+    /// Exclude the given authorities' blocks and transactions from the
+    /// latency histograms from now on.
+    pub fn exclude_authors_from_latency(&self, authors: &[AuthorityIndex]) {
+        self.latency_excluded_authors
+            .write()
+            .extend(authors.iter().copied());
     }
 
     pub fn aggregate_and_display(
@@ -979,6 +994,14 @@ impl Metrics {
         byzantine_authorities: &[AuthorityIndex],
     ) {
         let num_validators = metrics.len() as u64;
+        let latency_population = if metrics
+            .first()
+            .is_some_and(|m| !m.latency_excluded_authors.read().is_empty())
+        {
+            "honest-author transactions and blocks only"
+        } else {
+            "all sequenced transactions and blocks"
+        };
 
         // Calculate overall statistics
         let average_transactions: u64 = metrics
@@ -1122,6 +1145,7 @@ impl Metrics {
         // Performance metrics
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Performance Metrics"]);
+        table.add_row(row![b->"Latency population:", latency_population]);
         table.add_row(
             row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)],
         );
