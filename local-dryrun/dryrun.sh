@@ -35,6 +35,8 @@ DISSEMINATION_MODE=${DISSEMINATION_MODE:-protocol-default}
 UPLINK_LIMIT_MBPS=${UPLINK_LIMIT_MBPS:-}
 # Explicit leader timeout in ms for all nodes (empty = protocol default).
 LEADER_TIMEOUT_MS=${LEADER_TIMEOUT_MS:-}
+# Integer factor applied to the per-node load of Byzantine nodes.
+BYZANTINE_LOAD_MULTIPLIER=${BYZANTINE_LOAD_MULTIPLIER:-1}
 # Enable lz4 network compression.
 # Auto-enabled for random transaction mode.
 # Set COMPRESS_NETWORK=1 or =0 to override.
@@ -548,7 +550,7 @@ EOH
                 equivocating-chains|equivocating-two-chains|equivocating-chains-bomb)
                     LOAD=0 ;;
                 *)
-                    LOAD=$TPS_PER_NODE ;;
+                    LOAD=$(( TPS_PER_NODE * BYZANTINE_LOAD_MULTIPLIER )) ;;
             esac
         else
             LOAD=$TPS_PER_NODE

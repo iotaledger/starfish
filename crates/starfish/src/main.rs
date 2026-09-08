@@ -185,6 +185,11 @@ enum Operation {
         /// each protocol's default (2Δ for Push, 8Δ for Lazy-Push pacemakers).
         #[clap(long, value_name = "INT")]
         leader_timeout_ms: Option<u64>,
+        /// Multiply the per-node transaction load of Byzantine nodes by this
+        /// factor, for payload-heavy attacks. Equivocating strategies still
+        /// generate no transactions.
+        #[clap(long, value_name = "FLOAT", default_value_t = 1.0)]
+        byzantine_load_multiplier: f64,
     },
 }
 
@@ -291,6 +296,7 @@ async fn main() -> Result<()> {
             dissemination_mode,
             uplink_limit_mbps,
             leader_timeout_ms,
+            byzantine_load_multiplier,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
             node_parameters.uplink_limit_mbps = uplink_limit_mbps;
@@ -312,6 +318,7 @@ async fn main() -> Result<()> {
                 consensus_protocol,
                 duration_secs,
                 leader_timeout_ms,
+                byzantine_load_multiplier,
             )
             .await?;
         }
@@ -397,12 +404,14 @@ async fn local_benchmark(
     consensus_protocol: String,
     duration_secs: u64,
     leader_timeout_ms: Option<u64>,
+    byzantine_load_multiplier: f64,
 ) -> Result<()> {
     println!("\n=== Benchmark Configuration ===");
     println!("Committee Size: {committee_size}");
     println!("Byzantine Nodes: {num_byzantine_nodes}");
     if num_byzantine_nodes != 0 {
         println!("Byzantine Strategy: {byzantine_strategy}");
+        println!("Byzantine Load Multiplier: {byzantine_load_multiplier}");
     }
     println!("Transaction Load: {load} tx/s");
     println!("Consensus Protocol: {consensus_protocol}");
@@ -456,7 +465,10 @@ async fn local_benchmark(
             ..parameters.clone()
         }
     } else {
-        parameters.clone()
+        Parameters {
+            load: (load as f64 * byzantine_load_multiplier).round() as usize,
+            ..parameters.clone()
+        }
     };
     // Same placement rule as the validator start loop below.
     let byzantine_authorities: Vec<AuthorityIndex> = (0..committee_size)

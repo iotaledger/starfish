@@ -53,6 +53,7 @@ Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
 |---|---|---|
 | `NUM_BYZANTINE_NODES` | `1` | Must be < `NUM_NODES / 3` |
 | `BYZANTINE_STRATEGY` | `equivocating-chains-bomb` | See strategies below |
+| `BYZANTINE_LOAD_MULTIPLIER` | `1` | Integer factor applied to the per-node load of Byzantine nodes (payload-heavy attacks) |
 
 Strategies: `timeout-leader`, `leader-withholding`,
 `equivocating-chains`, `equivocating-two-chains`, `chain-bomb`,
