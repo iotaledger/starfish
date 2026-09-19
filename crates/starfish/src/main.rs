@@ -77,6 +77,14 @@ enum Operation {
         /// config.
         #[clap(long, value_name = "SCHEME")]
         block_authentication: Option<BlockAuthenticationScheme>,
+        /// Benchmark authors to exclude from latency histograms. Transaction
+        /// sequencing and per-author counters remain unchanged.
+        #[clap(long, value_name = "AUTHORS", value_delimiter = ',')]
+        latency_excluded_authors: Vec<AuthorityIndex>,
+        /// Stop this benchmark validator after at most this many seconds,
+        /// including startup. Omit to run indefinitely.
+        #[clap(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+        duration_secs: Option<u64>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -236,8 +244,10 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             consensus: consensus_protocol,
             block_authentication,
+            latency_excluded_authors,
+            duration_secs,
         } => {
-            run(
+            let node = run(
                 authority,
                 committee_path,
                 public_config_path,
@@ -246,8 +256,18 @@ async fn main() -> Result<()> {
                 byzantine_strategy,
                 consensus_protocol,
                 block_authentication,
-            )
-            .await?
+                latency_excluded_authors,
+            );
+            if let Some(seconds) = duration_secs {
+                tokio::select! {
+                    result = node => result?,
+                    _ = tokio::time::sleep(Duration::from_secs(seconds)) => {
+                        tracing::info!(seconds, "Benchmark validator duration completed");
+                    }
+                }
+            } else {
+                node.await?;
+            }
         }
         Operation::DryRun {
             authority,
@@ -662,11 +682,18 @@ async fn run(
     byzantine_strategy: String,
     consensus_protocol: String,
     block_authentication: Option<BlockAuthenticationScheme>,
+    latency_excluded_authors: Vec<AuthorityIndex>,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
     let committee = Committee::load(&committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
+    if latency_excluded_authors
+        .iter()
+        .any(|author| *author as usize >= committee.len())
+    {
+        eyre::bail!("--latency-excluded-authors contains an authority outside the committee");
+    }
     let mut public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
         "Failed to load parameters file '{public_config_path}'"
     ))?;
@@ -693,6 +720,13 @@ async fn run(
         consensus_protocol,
     )
     .await?;
+    validator
+        .metrics()
+        .exclude_authors_from_latency(&latency_excluded_authors);
+    tracing::info!(
+        ?latency_excluded_authors,
+        "Configured benchmark latency population"
+    );
     let (network_result, _metrics_result) = validator.await_completion().await;
     network_result.expect("Validator crashed");
     Ok(())
@@ -872,6 +906,56 @@ mod tests {
     use starfish_core::block_authentication::BlockAuthenticationScheme;
 
     use super::{Args, Operation, ipv4_add_offset};
+
+    #[test]
+    fn distributed_benchmark_options_are_explicit_and_optional() {
+        let base = [
+            "starfish",
+            "run",
+            "--authority",
+            "1",
+            "--committee-path",
+            "committee.yaml",
+            "--public-config-path",
+            "public.yaml",
+            "--private-config-path",
+            "private.yaml",
+            "--parameters-path",
+            "parameters.yaml",
+        ];
+        let args = Args::try_parse_from(base).unwrap();
+        let Operation::Run {
+            latency_excluded_authors,
+            duration_secs,
+            ..
+        } = args.operation
+        else {
+            panic!("expected run");
+        };
+        assert!(latency_excluded_authors.is_empty());
+        assert_eq!(duration_secs, None);
+
+        let mut bounded = base.to_vec();
+        bounded.extend([
+            "--latency-excluded-authors",
+            "0,3,6",
+            "--duration-secs",
+            "120",
+        ]);
+        let args = Args::try_parse_from(&bounded).unwrap();
+        let Operation::Run {
+            latency_excluded_authors,
+            duration_secs,
+            ..
+        } = args.operation
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(latency_excluded_authors, vec![0, 3, 6]);
+        assert_eq!(duration_secs, Some(120));
+        *bounded.last_mut().unwrap() = "0";
+        assert!(Args::try_parse_from(bounded).is_err());
+    }
 
     #[test]
     fn block_authentication_is_parsed_independently_of_consensus() {
