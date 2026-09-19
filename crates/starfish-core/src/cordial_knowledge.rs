@@ -816,6 +816,103 @@ impl ConnectionKnowledge {
 // DagKnowledgeInner — per-block known_by tracking for push dissemination
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+struct PendingCausalBlock {
+    reference: BlockReference,
+    parents_expanded: bool,
+}
+
+/// Ancestor work owned by one peer's broadcast task. Sending a block and
+/// exploring its parents are separate: a capped batch or a delayed DAG update
+/// must not make the remaining ancestors disappear.
+#[derive(Default)]
+pub(crate) struct CausalHistory {
+    pending: VecDeque<PendingCausalBlock>,
+    seen: AHashSet<BlockReference>,
+    lowest_round: RoundNumber,
+}
+
+impl CausalHistory {
+    pub(crate) fn add_roots(&mut self, roots: &[BlockReference], lowest_round: RoundNumber) {
+        if lowest_round > self.lowest_round {
+            self.lowest_round = lowest_round;
+            self.seen.retain(|r| r.round >= lowest_round);
+            self.pending.retain(|p| p.reference.round >= lowest_round);
+        }
+        let mut new_roots = Vec::new();
+        for &reference in roots {
+            if self.mark_new(reference) {
+                new_roots.push(PendingCausalBlock {
+                    reference,
+                    parents_expanded: false,
+                });
+            }
+        }
+        // Give the latest own block's direct parents priority over older work.
+        for root in new_roots.into_iter().rev() {
+            self.pending.push_front(root);
+        }
+    }
+
+    fn mark_new(&mut self, reference: BlockReference) -> bool {
+        reference.round > 0 && reference.round >= self.lowest_round && self.seen.insert(reference)
+    }
+
+    pub(crate) fn take(
+        &mut self,
+        dag: &DagKnowledgeInner,
+        peer: AuthorityIndex,
+        own_authority: AuthorityIndex,
+        sent: &AHashSet<BlockReference>,
+        limit: usize,
+    ) -> Vec<BlockReference> {
+        let mut selected = Vec::new();
+        let mut retry = Vec::new();
+        // Bound read-lock work even when most queued blocks are already sent
+        // or known. Unvisited entries remain queued for the next wake-up.
+        for _ in 0..limit.saturating_mul(2) {
+            if selected.len() >= limit {
+                break;
+            }
+            let Some(mut next) = self.pending.pop_front() else {
+                break;
+            };
+            let reference = next.reference;
+            let needs_send = reference.authority != own_authority && !sent.contains(&reference);
+            if next.parents_expanded && !needs_send {
+                continue;
+            }
+            if reference.authority == peer || dag.peer_knows(&reference, peer).unwrap_or(false) {
+                continue;
+            }
+            if !next.parents_expanded {
+                if let Some((parents, _)) = dag.dag_get(&reference) {
+                    for &parent in parents {
+                        if self.mark_new(parent) {
+                            self.pending.push_back(PendingCausalBlock {
+                                reference: parent,
+                                parents_expanded: false,
+                            });
+                        }
+                    }
+                    next.parents_expanded = true;
+                }
+            }
+            if needs_send {
+                selected.push(reference);
+            }
+            if needs_send || !next.parents_expanded {
+                // Retry missing DAG entries after the actor catches up. Also
+                // retain selected refs until materialization/send bookkeeping
+                // confirms that they actually entered an outgoing batch.
+                retry.push(next);
+            }
+        }
+        self.pending.extend(retry);
+        selected
+    }
+}
+
 /// Per-authority dag with `known_by` bitmask propagation. Used by push
 /// dissemination to skip blocks that the destination peer is already known
 /// to have. Mutated only by the [`CordialKnowledge`] actor; readers (the
@@ -1001,61 +1098,6 @@ impl DagKnowledgeInner {
         candidates.sort_by_key(|(_, round)| *round);
         candidates.truncate(limit);
         candidates
-    }
-
-    /// BFS-walk ancestors of `roots`, returning block refs whose `known_by`
-    /// bit for `peer` is not yet set. Walks the in-memory parent graph; does
-    /// not touch dag-state storage. Refs originating from `peer` itself,
-    /// from `own_authority`, at round 0, or already in `sent` are skipped.
-    /// The walk halts at evicted blocks (no entry in the dag map) and at
-    /// `limit`.
-    pub fn collect_unsent_ancestor_refs(
-        &self,
-        roots: &[BlockReference],
-        peer: AuthorityIndex,
-        own_authority: AuthorityIndex,
-        sent: &AHashSet<BlockReference>,
-        limit: usize,
-    ) -> Vec<BlockReference> {
-        if limit == 0 || roots.is_empty() {
-            return Vec::new();
-        }
-        let peer_bit = AuthoritySet::singleton(peer);
-        let mut queued: AHashSet<BlockReference> = AHashSet::with_capacity(roots.len());
-        let mut frontier: VecDeque<BlockReference> = roots.iter().copied().collect();
-        let mut collected: Vec<BlockReference> = Vec::with_capacity(limit);
-
-        while let Some(node) = frontier.pop_front() {
-            if collected.len() >= limit {
-                break;
-            }
-            // Snapshot parents so we can release the dag borrow before the
-            // per-parent known_by lookup below.
-            let parents = match self.dag_get(&node) {
-                Some((parents, _)) => parents.clone(),
-                None => continue, // evicted or not tracked — halt this branch
-            };
-            for parent in parents {
-                if collected.len() >= limit {
-                    break;
-                }
-                if parent.round == 0
-                    || parent.authority == peer
-                    || parent.authority == own_authority
-                    || sent.contains(&parent)
-                    || !queued.insert(parent)
-                {
-                    continue;
-                }
-                match self.dag_get(&parent) {
-                    Some((_, known_by)) if !(*known_by & peer_bit).is_empty() => continue,
-                    _ => {}
-                }
-                collected.push(parent);
-                frontier.push_back(parent);
-            }
-        }
-        collected
     }
 
     /// Round-fair variant of [`Self::collect_unsent_refs`]: within each round,
@@ -1399,6 +1441,212 @@ mod tests {
             round,
             digest: Default::default(),
         }
+    }
+
+    fn add_chain(dag: &mut DagKnowledgeInner, author: AuthorityIndex, length: RoundNumber) {
+        for round in 1..=length {
+            let parents = if round == 1 {
+                vec![]
+            } else {
+                vec![block_ref(author, round - 1)]
+            };
+            dag.update_dag(block_ref(author, round), parents, &mut vec![]);
+        }
+    }
+
+    #[test]
+    fn causal_history_deduplicates_roots_and_ancestors() {
+        let mut dag = DagKnowledgeInner::new(0, 5);
+        let oldest = block_ref(4, 1);
+        let middle = block_ref(3, 2);
+        let tip = block_ref(2, 3);
+        dag.update_dag(oldest, vec![], &mut vec![]);
+        dag.update_dag(middle, vec![oldest], &mut vec![]);
+        dag.update_dag(tip, vec![middle], &mut vec![]);
+        let mut history = CausalHistory::default();
+        history.add_roots(&[tip, middle, tip], 0);
+        assert_eq!(
+            history.take(&dag, 1, 0, &AHashSet::new(), 3),
+            vec![tip, middle, oldest]
+        );
+    }
+
+    #[test]
+    fn causal_history_explores_sent_tip_without_resending_it() {
+        let mut dag = DagKnowledgeInner::new(0, 19);
+        add_chain(&mut dag, 2, 19);
+        let tip = block_ref(2, 19);
+        let sent = [tip].into_iter().collect();
+        let mut history = CausalHistory::default();
+        history.add_roots(&[tip], 0);
+        let selected = history.take(&dag, 1, 0, &sent, 57);
+        assert_eq!(
+            selected,
+            (1..19).rev().map(|r| block_ref(2, r)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn causal_history_resumes_after_actor_lag_without_new_roots() {
+        let mut dag = DagKnowledgeInner::new(0, 19);
+        let mut history = CausalHistory::default();
+        let tip = block_ref(2, 19);
+        history.add_roots(&[tip], 0);
+        assert_eq!(history.take(&dag, 1, 0, &AHashSet::new(), 57), vec![tip]);
+        let sent = [tip].into_iter().collect();
+        assert!(history.take(&dag, 1, 0, &sent, 57).is_empty());
+        add_chain(&mut dag, 2, 19);
+        let selected = history.take(&dag, 1, 0, &sent, 57);
+        assert_eq!(
+            selected,
+            (1..19).rev().map(|r| block_ref(2, r)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn causal_history_drains_capped_batches_without_repeating_sent_blocks() {
+        for n in [19usize, 40, 100] {
+            let own = (n - 2) as AuthorityIndex;
+            let peer = (n - 1) as AuthorityIndex;
+            let mut dag = DagKnowledgeInner::new(own, n);
+            let mut roots = Vec::new();
+            let expected: AHashSet<_> = (0..(n - 1) / 3)
+                .flat_map(|faulty| {
+                    (1..=n as RoundNumber)
+                        .map(move |r| block_ref((3 * faulty) as AuthorityIndex, r))
+                })
+                .collect();
+            for faulty in 0..(n - 1) / 3 {
+                let author = (3 * faulty) as AuthorityIndex;
+                add_chain(&mut dag, author, n as RoundNumber);
+                roots.push(block_ref(author, n as RoundNumber));
+            }
+            let mut history = CausalHistory::default();
+            history.add_roots(&roots, 0);
+            let mut sent = AHashSet::new();
+            let mut calls = 0;
+            while !history.pending.is_empty() {
+                calls += 1;
+                assert!(calls <= expected.len() + 1, "pending history must drain");
+                let batch = history.take(&dag, peer, own, &sent, 3 * n);
+                assert!(batch.len() <= 3 * n);
+                for reference in batch {
+                    assert!(sent.insert(reference), "must not resend {reference:?}");
+                }
+            }
+            assert_eq!(sent, expected);
+            eprintln!(
+                "causal history n={n}: {} unique blocks drained in {calls} calls, zero repeats",
+                sent.len()
+            );
+        }
+    }
+
+    #[test]
+    fn causal_history_prunes_known_history_and_explores_own_parents() {
+        let mut dag = DagKnowledgeInner::new(0, 4);
+        add_chain(&mut dag, 2, 19);
+        // The peer has proved knowledge of the first ten chain blocks.
+        dag.update_dag(block_ref(1, 11), vec![block_ref(2, 10)], &mut vec![]);
+        // Our previously sent block references the still-unknown suffix.
+        let own = block_ref(0, 20);
+        dag.update_dag(own, vec![block_ref(2, 19)], &mut vec![]);
+        let mut history = CausalHistory::default();
+        history.add_roots(&[own], 0);
+        let selected = history.take(&dag, 1, 0, &[own].into_iter().collect(), 57);
+        assert_eq!(
+            selected,
+            (11..=19).rev().map(|r| block_ref(2, r)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn causal_history_retries_selected_blocks_until_recorded_as_sent() {
+        let mut dag = DagKnowledgeInner::new(0, 4);
+        add_chain(&mut dag, 2, 2);
+        let mut history = CausalHistory::default();
+        history.add_roots(&[block_ref(2, 2)], 0);
+        let first = history.take(&dag, 1, 0, &AHashSet::new(), 12);
+        assert_eq!(first.len(), 2);
+        // Only one selected block made it into the materialized batch.
+        let sent = [block_ref(2, 2)].into_iter().collect();
+        assert_eq!(history.take(&dag, 1, 0, &sent, 12), vec![block_ref(2, 1)]);
+        let sent = first.into_iter().collect();
+        assert!(history.take(&dag, 1, 0, &sent, 12).is_empty());
+        assert!(history.pending.is_empty());
+    }
+
+    #[test]
+    fn causal_history_fits_n19_chain_after_forwarding_other_history() {
+        let mut dag = DagKnowledgeInner::new(17, 19);
+        let mut history = CausalHistory::default();
+        let side_heads: Vec<_> = (2..14).map(|a| block_ref(a, 19)).collect();
+        for author in 2..14 {
+            add_chain(&mut dag, author, 19);
+        }
+        history.add_roots(&side_heads, 0);
+        let mut sent = AHashSet::new();
+        for _ in 0..10 {
+            let batch = history.take(&dag, 18, 17, &sent, 57);
+            sent.extend(batch);
+            if history.pending.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(sent.len(), 228);
+        assert!(history.pending.is_empty());
+
+        // A newly released chain references the history already forwarded
+        // above. The recipient has not sent any knowledge feedback.
+        for round in 1..=19 {
+            let parents = if round == 1 {
+                vec![]
+            } else {
+                std::iter::once(block_ref(0, round - 1))
+                    .chain((2..14).map(|a| block_ref(a, round - 1)))
+                    .collect()
+            };
+            dag.update_dag(block_ref(0, round), parents, &mut vec![]);
+        }
+        let mut roots = vec![block_ref(0, 19)];
+        roots.extend(side_heads);
+        history.add_roots(&roots, 0);
+        assert_eq!(
+            history.take(&dag, 18, 17, &sent, 57),
+            (1..=19).rev().map(|r| block_ref(0, r)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn causal_history_bounds_traversal_of_already_sent_blocks() {
+        let mut dag = DagKnowledgeInner::new(0, 4);
+        add_chain(&mut dag, 2, 1000);
+        let sent = (1..=1000).map(|r| block_ref(2, r)).collect();
+        let mut history = CausalHistory::default();
+        history.add_roots(&[block_ref(2, 1000)], 0);
+        assert!(history.take(&dag, 1, 0, &sent, 3).is_empty());
+        // Six entries were inspected; the next ancestor is retained rather
+        // than scanning all 1,000 blocks while holding the shared DAG lock.
+        assert_eq!(history.seen.len(), 7);
+        assert_eq!(history.pending.len(), 1);
+        assert_eq!(history.pending[0].reference, block_ref(2, 994));
+    }
+
+    #[test]
+    fn causal_history_evicts_pending_work_and_seen_references() {
+        let dag = DagKnowledgeInner::new(0, 4);
+        let mut history = CausalHistory::default();
+        history.add_roots(&[block_ref(2, 1), block_ref(2, 2)], 0);
+        assert!(history.take(&dag, 1, 0, &AHashSet::new(), 0).is_empty());
+        history.add_roots(&[block_ref(2, 1)], 2);
+        assert_eq!(history.seen, [block_ref(2, 2)].into_iter().collect());
+        assert_eq!(
+            history.take(&dag, 1, 0, &AHashSet::new(), 12),
+            vec![block_ref(2, 2)]
+        );
+        history.add_roots(&[], 3);
+        assert!(history.pending.is_empty());
+        assert!(history.seen.is_empty());
     }
 
     #[test]

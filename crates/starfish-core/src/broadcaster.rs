@@ -18,6 +18,7 @@ use crate::{
     committee::{QuorumThreshold, StakeAggregator},
     config::DisseminationMode,
     consensus::universal_committer::UniversalCommitter,
+    cordial_knowledge::CausalHistory,
     dag_state::{ByzantineStrategy, ConsensusProtocol, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -785,6 +786,7 @@ where
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let sample_timeout = broadcaster_parameters.sample_timeout;
+        let mut causal_history = CausalHistory::default();
         loop {
             let block_notified = inner.block_ready_notify.notified();
             let proposal_round_notified = inner.proposal_round_notify.notified();
@@ -819,6 +821,7 @@ where
                         sent_to_peer.clone(),
                         &metrics,
                         PushSelectionMode::Causal,
+                        &mut causal_history,
                     )
                     .await?;
                 }
@@ -832,6 +835,7 @@ where
                         sent_to_peer.clone(),
                         &metrics,
                         PushSelectionMode::Useful,
+                        &mut causal_history,
                     )
                     .await?;
                 }
@@ -930,14 +934,25 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
     }
 }
 
-/// Track sent references in `sent_to_peer`, evict stale entries, and send the
-/// batch.
+/// Derive tracking from the batch itself so full blocks, headers, and shards
+/// use the same per-peer bookkeeping in both dissemination formats.
+fn record_sent_batch(batch: &BlockBatch, sent: &mut AHashSet<BlockReference>) {
+    sent.extend(
+        batch
+            .full_blocks
+            .iter()
+            .chain(batch.headers.iter())
+            .map(|b| *b.reference())
+            .chain(batch.shards.iter().map(|s| s.block_reference)),
+    );
+}
+
+/// Track the actual outgoing batch, evict stale entries, and queue it.
 async fn send_batch_and_track<H, C>(
     to: &Sender<NetworkMessage>,
     batch: BlockBatch,
     inner: &Arc<NetworkSyncerInner<H, C>>,
     sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
-    refs: impl Iterator<Item = BlockReference>,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -945,9 +960,7 @@ where
 {
     {
         let mut sent = sent_to_peer.write();
-        for r in refs {
-            sent.insert(r);
-        }
+        record_sent_batch(&batch, &mut sent);
         let lowest_round = inner.dag_state.lowest_round();
         sent.retain(|r| r.round >= lowest_round);
     }
@@ -964,60 +977,22 @@ fn take_unknown_causal_history_header_refs<H, C>(
     own_blocks: &[Data<VerifiedBlock>],
     sent_to_peer: &AHashSet<BlockReference>,
     limit: usize,
+    causal_history: &mut CausalHistory,
 ) -> Vec<BlockReference>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    if limit == 0 {
-        return Vec::new();
-    }
-
+    let roots: Vec<_> = own_blocks
+        .iter()
+        .flat_map(|block| block.block_references().iter().copied())
+        .collect();
+    causal_history.add_roots(&roots, inner.dag_state.lowest_round());
     let Some(dag) = inner.cordial_knowledge.dag_knowledge() else {
         return Vec::new();
     };
-
-    // Fast path: include direct parents of newly pushed own blocks that we
-    // believe the peer is missing, even if the CordialKnowledge actor hasn't
-    // yet processed the new block's `BlockAdded` event.
     let dag = dag.read();
-    let mut direct_unknown: Vec<BlockReference> = Vec::new();
-    let mut seen = AHashSet::new();
-    for block in own_blocks {
-        for parent in block.block_references().iter().copied() {
-            if direct_unknown.len() >= limit {
-                return direct_unknown;
-            }
-            if parent.round == 0
-                || parent.authority == peer
-                || parent.authority == own_authority
-                || sent_to_peer.contains(&parent)
-                || !seen.insert(parent)
-            {
-                continue;
-            }
-            if dag.peer_knows(&parent, peer).unwrap_or(false) {
-                continue;
-            }
-            direct_unknown.push(parent);
-        }
-    }
-
-    // Fill remaining budget by walking further ancestors using the in-memory
-    // parent graph in CordialKnowledge (no DagState traversal).
-    let remaining = limit.saturating_sub(direct_unknown.len());
-    if remaining > 0 && !direct_unknown.is_empty() {
-        let more = dag.collect_unsent_ancestor_refs(
-            &direct_unknown,
-            peer,
-            own_authority,
-            sent_to_peer,
-            remaining,
-        );
-        direct_unknown.extend(more);
-    }
-
-    direct_unknown
+    causal_history.take(&dag, peer, own_authority, sent_to_peer, limit)
 }
 
 fn take_causal_shard_refs<H, C>(
@@ -1085,8 +1060,7 @@ where
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
-    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
-    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer).await
 }
 
 fn select_push_batch_parts<H, C>(
@@ -1096,6 +1070,7 @@ fn select_push_batch_parts<H, C>(
     broadcaster_parameters: &BroadcasterParameters,
     selection_mode: PushSelectionMode,
     sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
+    causal_history: &mut CausalHistory,
 ) -> Option<PushBatchParts>
 where
     C: 'static + CommitObserver,
@@ -1133,6 +1108,7 @@ where
                     &own_blocks,
                     &sent,
                     broadcaster_parameters.batch_other_block_size,
+                    causal_history,
                 )
             };
             let mut shard_refs = Vec::new();
@@ -1358,6 +1334,7 @@ async fn send_push_batch<H, C>(
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     metrics: &Metrics,
     selection_mode: PushSelectionMode,
+    causal_history: &mut CausalHistory,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -1385,12 +1362,11 @@ where
         if let Ok(size) = bincode::serialized_size(&fast_batch) {
             metrics.block_bundle_size_bytes.observe(size as usize);
         }
-        let own_refs: Vec<_> = own_blocks.iter().map(|b| *b.reference()).collect();
         tracing::debug!(
             "Push fast batch to {peer}: {} full own blocks",
             fast_batch.full_blocks.len()
         );
-        send_batch_and_track(&to, fast_batch, &inner, &sent_to_peer, own_refs.into_iter()).await?;
+        send_batch_and_track(&to, fast_batch, &inner, &sent_to_peer).await?;
     }
 
     // Phase 2 — slow batch: heavy selection (CK reads/writes) for headers
@@ -1403,6 +1379,7 @@ where
         &broadcaster_parameters,
         selection_mode,
         sent_to_peer.as_ref(),
+        causal_history,
     );
     report_useful_authorities(
         metrics,
@@ -1426,24 +1403,12 @@ where
     }
 
     tracing::debug!(
-        "Push slow batch to {peer}: {} headers, {} shards",
+        "Push slow batch to {peer}: {} full blocks, {} headers, {} shards",
+        slow_batch.full_blocks.len(),
         slow_batch.headers.len(),
         slow_batch.shards.len()
     );
-    let slow_refs: Vec<_> = slow_batch
-        .headers
-        .iter()
-        .map(|b| *b.reference())
-        .chain(slow_batch.shards.iter().map(|s| s.block_reference))
-        .collect();
-    send_batch_and_track(
-        &to,
-        slow_batch,
-        &inner,
-        &sent_to_peer,
-        slow_refs.into_iter(),
-    )
-    .await
+    send_batch_and_track(&to, slow_batch, &inner, &sent_to_peer).await
 }
 
 enum BlockFetcherMessage {
@@ -1527,6 +1492,59 @@ impl BlockFetcherWorker {
 mod tests {
     use super::*;
     use crate::committee::Committee;
+
+    #[test]
+    fn full_blocks_and_headers_share_sent_tracking_and_history_completion() {
+        for protocol in [ConsensusProtocol::Mysticeti, ConsensusProtocol::Starfish] {
+            let mut dag = crate::cordial_knowledge::DagKnowledgeInner::new(0, 19);
+            let mut blocks = HashMap::new();
+            let mut parents = vec![];
+            for round in 1..=19 {
+                let block = Data::new(VerifiedBlock::new(
+                    2,
+                    round,
+                    parents.clone(),
+                    vec![],
+                    0,
+                    crate::block_authentication::BlockAuthentication::None,
+                    vec![],
+                    None,
+                    None,
+                    None,
+                    None,
+                ));
+                let reference = *block.reference();
+                dag.update_dag(reference, parents, &mut vec![]);
+                parents = vec![reference];
+                blocks.insert(reference, block);
+            }
+            // Exercise both a whole-chain batch and a deliberately small cap.
+            for limit in [57, 3] {
+                let mut history = CausalHistory::default();
+                history.add_roots(&parents, 0);
+                let mut sent = AHashSet::new();
+                for call in 0..20 {
+                    let selected = history.take(&dag, 1, 0, &sent, limit);
+                    if call == 0 {
+                        assert_eq!(selected.len(), limit.min(19));
+                    }
+                    assert!(selected.iter().all(|r| !sent.contains(r)));
+                    let mut batch = BlockBatch::full_only(DataSource::BlockBundleStreaming, vec![]);
+                    let selected_blocks = selected.iter().map(|r| blocks[r].clone()).collect();
+                    match push_transport_format(protocol) {
+                        PushOtherBlocksFormat::FullBlocks => batch.full_blocks = selected_blocks,
+                        PushOtherBlocksFormat::HeadersAndShards => batch.headers = selected_blocks,
+                    }
+                    record_sent_batch(&batch, &mut sent);
+                    if sent.len() == 19 {
+                        break;
+                    }
+                }
+                assert_eq!(sent.len(), 19);
+                assert!(history.take(&dag, 1, 0, &sent, limit).is_empty());
+            }
+        }
+    }
 
     fn holder_set(authorities: &[AuthorityIndex]) -> StakeAggregator<QuorumThreshold> {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);

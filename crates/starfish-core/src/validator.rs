@@ -282,7 +282,7 @@ mod smoke_tests {
     use crate::{
         block_authentication::BlockAuthenticationScheme,
         committee::Committee,
-        config::{self, NodePrivateConfig, NodePublicConfig, Parameters},
+        config::{self, DisseminationMode, NodePrivateConfig, NodePublicConfig, Parameters},
         prometheus,
         types::AuthorityIndex,
     };
@@ -315,6 +315,7 @@ mod smoke_tests {
             consensus,
             BlockAuthenticationScheme::Ed25519,
             port_offset,
+            DisseminationMode::default(),
         )
         .await;
     }
@@ -323,6 +324,7 @@ mod smoke_tests {
         consensus: &str,
         block_authentication: BlockAuthenticationScheme,
         port_offset: u16,
+        dissemination: DisseminationMode,
     ) {
         let committee_size = 4;
         let committee =
@@ -330,6 +332,7 @@ mod smoke_tests {
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication;
+        public_config.parameters.dissemination_mode = dissemination;
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -372,6 +375,12 @@ mod smoke_tests {
             ),
         }
 
+        if dissemination == DisseminationMode::PushCausal {
+            let addresses: Vec<_> = public_config.all_metric_addresses().enumerate().collect();
+            let commits = await_min_commit_index(&addresses, 3, timeout).await;
+            verify_digest_consistency(&commits);
+        }
+
         for v in validators {
             v.stop().await;
         }
@@ -389,6 +398,19 @@ mod smoke_tests {
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
+    }
+
+    #[test_case("mysticeti", 1600)]
+    #[test_case("starfish", 1620)]
+    #[tokio::test]
+    async fn validator_commit_push_causal(consensus: &str, port_offset: u16) {
+        run_commit_test_with_authentication(
+            consensus,
+            BlockAuthenticationScheme::Ed25519,
+            port_offset,
+            DisseminationMode::PushCausal,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -412,7 +434,13 @@ mod smoke_tests {
         block_authentication: BlockAuthenticationScheme,
         port_offset: u16,
     ) {
-        run_commit_test_with_authentication(consensus, block_authentication, port_offset).await;
+        run_commit_test_with_authentication(
+            consensus,
+            block_authentication,
+            port_offset,
+            DisseminationMode::default(),
+        )
+        .await;
     }
 
     #[tokio::test]
