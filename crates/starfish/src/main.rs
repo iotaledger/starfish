@@ -132,6 +132,14 @@ enum Operation {
         /// Number of parallel threads for BLS batch verification (default: 5).
         #[clap(long, value_name = "INT")]
         bls_workers: Option<usize>,
+        /// Emulated outbound bandwidth cap per node, in Mbit/s (unset:
+        /// unlimited).
+        #[clap(long, value_name = "FLOAT")]
+        uplink_limit_mbps: Option<f64>,
+        /// Explicit leader timeout in milliseconds; unset uses the protocol
+        /// default (2Δ for Push, 8Δ for Lazy-Push pacemakers).
+        #[clap(long, value_name = "INT")]
+        leader_timeout_ms: Option<u64>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -169,6 +177,31 @@ enum Operation {
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING")]
         dissemination_mode: Option<String>,
+        /// Emulated outbound bandwidth cap per node, in Mbit/s (unset:
+        /// unlimited).
+        #[clap(long, value_name = "FLOAT")]
+        uplink_limit_mbps: Option<f64>,
+        /// Explicit leader timeout in milliseconds for all nodes; unset uses
+        /// each protocol's default (2Δ for Push, 8Δ for Lazy-Push pacemakers).
+        #[clap(long, value_name = "INT")]
+        leader_timeout_ms: Option<u64>,
+        /// Multiply the per-node transaction load of Byzantine nodes by this
+        /// factor, for payload-heavy attacks. Equivocating strategies still
+        /// generate no transactions.
+        #[clap(long, value_name = "FLOAT", default_value_t = 1.0)]
+        byzantine_load_multiplier: f64,
+        /// Generate transactions for exactly this many seconds after the
+        /// warmup, then stop and drain. When set, the run lasts
+        /// warmup + generation + drain and `--duration-secs` is ignored;
+        /// throughput divides by the generation window and the summary
+        /// reports the fraction of submitted honest transactions that were
+        /// eventually committed.
+        #[clap(long, value_name = "INT")]
+        generation_secs: Option<u64>,
+        /// Seconds to keep running after generation stops (only with
+        /// `--generation-secs`), so the backlog can commit.
+        #[clap(long, value_name = "INT", default_value_t = 0)]
+        drain_secs: u64,
     },
 }
 
@@ -234,6 +267,8 @@ async fn main() -> Result<()> {
             dissemination_mode,
             compress_network,
             bls_workers,
+            uplink_limit_mbps,
+            leader_timeout_ms,
         } => {
             dryrun(
                 authority,
@@ -253,6 +288,8 @@ async fn main() -> Result<()> {
                 dissemination_mode,
                 compress_network,
                 bls_workers,
+                uplink_limit_mbps,
+                leader_timeout_ms,
             )
             .await?
         }
@@ -269,8 +306,14 @@ async fn main() -> Result<()> {
             block_authentication,
             duration_secs,
             dissemination_mode,
+            uplink_limit_mbps,
+            leader_timeout_ms,
+            byzantine_load_multiplier,
+            generation_secs,
+            drain_secs,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
+            node_parameters.uplink_limit_mbps = uplink_limit_mbps;
             if let Some(latency) = uniform_latency_ms {
                 node_parameters.uniform_latency_ms = Some(latency);
             }
@@ -288,6 +331,10 @@ async fn main() -> Result<()> {
                 node_parameters,
                 consensus_protocol,
                 duration_secs,
+                leader_timeout_ms,
+                byzantine_load_multiplier,
+                generation_secs,
+                drain_secs,
             )
             .await?;
         }
@@ -372,12 +419,17 @@ async fn local_benchmark(
     node_parameters: NodeParameters,
     consensus_protocol: String,
     duration_secs: u64,
+    leader_timeout_ms: Option<u64>,
+    byzantine_load_multiplier: f64,
+    generation_secs: Option<u64>,
+    drain_secs: u64,
 ) -> Result<()> {
     println!("\n=== Benchmark Configuration ===");
     println!("Committee Size: {committee_size}");
     println!("Byzantine Nodes: {num_byzantine_nodes}");
     if num_byzantine_nodes != 0 {
         println!("Byzantine Strategy: {byzantine_strategy}");
+        println!("Byzantine Load Multiplier: {byzantine_load_multiplier}");
     }
     println!("Transaction Load: {load} tx/s");
     println!("Consensus Protocol: {consensus_protocol}");
@@ -405,22 +457,60 @@ async fn local_benchmark(
             node_parameters.adversarial_latency_percent
         );
     }
-    println!("Duration: {duration_secs} seconds");
-    println!("===========================\n");
+    match leader_timeout_ms {
+        Some(ms) => println!("Leader Timeout: {ms} ms (explicit, all nodes)"),
+        None => println!("Leader Timeout: protocol default"),
+    }
+    match node_parameters.uplink_limit_mbps {
+        Some(mbps) => println!("Uplink Limit: {mbps} Mbit/s per node (emulated)"),
+        None => println!("Uplink Limit: none"),
+    }
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let block_authentication = node_parameters.block_authentication;
     let committee =
         Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     load /= committee.len();
-    let parameters = Parameters::almost_default(load);
+    let mut parameters = Parameters::almost_default(load);
+    parameters.leader_timeout = leader_timeout_ms.map(Duration::from_millis);
+    // With an explicit generation window the run is warmup + generation +
+    // drain, throughput divides by the generation window only, and commits
+    // during the drain still count (committed-fraction measurement).
+    let warmup_secs = parameters.warmup_delay(committee_size).as_secs();
+    let (run_secs, report_secs) = match generation_secs {
+        Some(generation) => {
+            parameters.benchmark_duration = Some(Duration::from_secs(generation));
+            parameters.keep_metrics_open_after_generation = true;
+            println!(
+                "Run: {warmup_secs} s warmup + {generation} s generation + {drain_secs} s drain"
+            );
+            (warmup_secs + generation + drain_secs, generation)
+        }
+        None => {
+            println!("Duration: {duration_secs} seconds (cumulative window after warmup)");
+            (duration_secs, duration_secs)
+        }
+    };
+    println!("===========================\n");
+    let duration_secs = run_secs;
     // Equivocating Byzantine strategies must not generate transactions.
     let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
         .is_some_and(|s| s.is_equivocating())
     {
-        Parameters::almost_default(0)
+        Parameters {
+            load: 0,
+            ..parameters.clone()
+        }
     } else {
-        parameters.clone()
+        Parameters {
+            load: (load as f64 * byzantine_load_multiplier).round() as usize,
+            ..parameters.clone()
+        }
     };
+    // Same placement rule as the validator start loop below.
+    let byzantine_authorities: Vec<AuthorityIndex> = (0..committee_size)
+        .filter(|a| a.is_multiple_of(3) && a / 3 < num_byzantine_nodes)
+        .map(|a| a as AuthorityIndex)
+        .collect();
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
 
     // Create temporary directories for each validator
@@ -498,6 +588,13 @@ async fn local_benchmark(
             .await?
         };
         if !is_byzantine {
+            // Report latencies of honest-author transactions and blocks only;
+            // Byzantine payload (if ever sequenced) carries its withholding
+            // delay and would bias the comparison between protocols that do
+            // and do not sequence it.
+            validator
+                .metrics()
+                .exclude_authors_from_latency(&byzantine_authorities);
             metrics_of_honest_validators.push(validator.metrics());
             reporters_of_honest_validators.push(validator.reporter())
         }
@@ -522,7 +619,8 @@ async fn local_benchmark(
             Metrics::aggregate_and_display(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
-                duration_secs,
+                report_secs,
+                &byzantine_authorities,
             );
 
             // Abort all tasks
@@ -545,7 +643,8 @@ async fn local_benchmark(
             Metrics::aggregate_and_display(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
-                duration_secs,
+                report_secs,
+                &byzantine_authorities,
             );
             fs::remove_dir_all(base_dir)?;
             Ok(())
@@ -618,6 +717,8 @@ async fn dryrun(
     dissemination_mode: Option<String>,
     compress_network: bool,
     bls_workers: Option<usize>,
+    uplink_limit_mbps: Option<f64>,
+    leader_timeout_ms: Option<u64>,
 ) -> Result<()> {
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
@@ -630,6 +731,7 @@ async fn dryrun(
     let committee =
         Committee::new_for_benchmarks_with_authentication(committee_size, block_authentication);
     let mut parameters = Parameters::almost_default(load);
+    parameters.leader_timeout = leader_timeout_ms.map(Duration::from_millis);
     if let Some(ref backend) = storage_backend {
         parameters.storage_backend = match backend.as_str() {
             "rocksdb" => StorageBackend::Rocksdb,
@@ -654,6 +756,7 @@ async fn dryrun(
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
     node_parameters.block_authentication = block_authentication;
+    node_parameters.uplink_limit_mbps = uplink_limit_mbps;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }

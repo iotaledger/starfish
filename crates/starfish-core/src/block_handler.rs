@@ -133,17 +133,30 @@ impl RealCommitHandler {
             return;
         }
         let current_timestamp = runtime::timestamp_utc();
+        let latency_excluded = self
+            .metrics
+            .latency_excluded_authors
+            .read()
+            .contains(&block.authority());
         if let Some(vec) = block.transactions() {
+            let author_label = block.authority().to_string();
+            let sequenced_by_author = self
+                .metrics
+                .sequenced_transactions_by_author
+                .with_label_values(&[author_label.as_str()]);
             for transaction in vec {
                 let BaseTransaction::Share(transaction) = transaction;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                 let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
-                self.metrics.transaction_committed_latency.observe(latency);
-                self.metrics
-                    .transaction_committed_latency_squared_micros
-                    .inc_by(latency.as_micros().pow(2) as u64);
+                if !latency_excluded {
+                    self.metrics.transaction_committed_latency.observe(latency);
+                    self.metrics
+                        .transaction_committed_latency_squared_micros
+                        .inc_by(latency.as_micros().pow(2) as u64);
+                }
                 self.metrics.sequenced_transactions_total.inc();
+                sequenced_by_author.inc();
                 self.metrics
                     .sequenced_transactions_bytes
                     .inc_by(transaction.as_bytes().len() as u64);
@@ -315,7 +328,12 @@ impl CommitObserver for RealCommitHandler {
                     continue;
                 }
 
-                if metrics_active {
+                let latency_excluded = self
+                    .metrics
+                    .latency_excluded_authors
+                    .read()
+                    .contains(&block.authority());
+                if metrics_active && !latency_excluded {
                     self.metrics.block_committed_latency.observe(block_latency);
                     self.metrics
                         .block_committed_latency_squared_micros

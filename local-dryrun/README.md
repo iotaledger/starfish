@@ -44,6 +44,8 @@ Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
 | `STORAGE_BACKEND` | `rocksdb` | `rocksdb` or `tidehunter` |
 | `TRANSACTION_MODE` | `random` | `all_zero` or `random` |
 | `COMPRESS_NETWORK` | *(auto)* | `1` to enable lz4 compression, `0` to disable. Auto-enabled when `TRANSACTION_MODE=random` |
+| `UPLINK_LIMIT_MBPS` | *(unset)* | Emulated per-node outbound bandwidth cap in Mbit/s; unset leaves the uplink unlimited |
+| `LEADER_TIMEOUT_MS` | *(unset)* | Explicit leader timeout in ms for all nodes; unset uses the protocol default (600 for Push, 2400 for Lazy-Push pacemakers) |
 
 ### Byzantine Fault Testing
 
@@ -51,6 +53,7 @@ Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
 |---|---|---|
 | `NUM_BYZANTINE_NODES` | `1` | Must be < `NUM_NODES / 3` |
 | `BYZANTINE_STRATEGY` | `equivocating-chains-bomb` | See strategies below |
+| `BYZANTINE_LOAD_MULTIPLIER` | `1` | Integer factor applied to the per-node load of Byzantine nodes (payload-heavy attacks) |
 
 Strategies: `timeout-leader`, `leader-withholding`,
 `equivocating-chains`, `equivocating-two-chains`, `chain-bomb`,

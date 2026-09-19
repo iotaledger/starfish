@@ -26,16 +26,10 @@ type DagBlockEntry = (Vec<BlockReference>, AuthoritySet);
 /// Per-authority dag map: round -> digest -> (parents, known_by).
 type DagAuthorityMap = BTreeMap<RoundNumber, HashMap<BlockDigest, DagBlockEntry>>;
 
-/// Maximum round gap beyond which a peer's data is no longer considered useful.
-/// Headers/shards from an authority whose latest useful round is more than this
-/// many rounds behind the current round will not be piggybacked.
-/// Fixed window (in rounds) over which an authority's headers stay
-/// flagged "useful from" a peer. Headers fire on every newly-received
-/// header (or, on the to-peer side, on every `MissingParentsRequest` the
-/// peer sends us); the signal is naturally fresh, so a small absolute
-/// window is enough to ride out reorderings without keeping stale
-/// authors lit and dragging extra piggyback work into the response.
-const USEFUL_HEADERS_GAP: RoundNumber = 50;
+/// Window (in rounds) for headers, as a multiple of the committee size.
+/// Keep headers useful for two committee turnovers, including across gaps
+/// between an authority's selective broadcasts in its leader rounds.
+const USEFUL_HEADERS_GAP_FACTOR: RoundNumber = 2;
 /// Window (in rounds) for shards, as a multiple of the committee size.
 /// Shards fire only on explicit `MissingTxDataRequest`, so the signal is
 /// scarce; we keep it lit for two committee turnovers so the leader's
@@ -737,7 +731,7 @@ impl ConnectionKnowledge {
             Self::recent_authors_bitmask(
                 &self.last_useful_headers_from_peer_round,
                 current_round,
-                USEFUL_HEADERS_GAP,
+                USEFUL_HEADERS_GAP_FACTOR * n,
             ),
             Self::recent_authors_bitmask(
                 &self.last_useful_shards_from_peer_round,
@@ -758,7 +752,7 @@ impl ConnectionKnowledge {
             Self::recent_authors_bitmask(
                 &self.last_useful_headers_to_peer_round,
                 current_round,
-                USEFUL_HEADERS_GAP,
+                USEFUL_HEADERS_GAP_FACTOR * n,
             ),
             Self::recent_authors_bitmask(
                 &self.last_useful_shards_to_peer_round,
@@ -1536,25 +1530,44 @@ mod tests {
 
     #[test]
     fn test_useful_authors_bitmask() {
-        // committee_size 20 → header gap = 20, shard gap = 40.
-        let mut ck = ConnectionKnowledge::new(1, 20);
-        ck.mark_header_useful_from_peer(block_ref(0, 10));
-        ck.mark_shard_useful_from_peer(block_ref(2, 10));
-        let (headers, shards) = ck.useful_authors_bitmasks(20);
-        // round 10 + 20 (= committee_size) >= 20 → header still useful
-        assert!(headers.contains(0));
-        // round 10 + 40 (= 2 * committee_size) >= 20 → shard still useful
-        assert!(shards.contains(2));
+        for committee_size in [10, 31, 100] {
+            let mut ck = ConnectionKnowledge::new(1, committee_size);
+            ck.mark_header_useful_from_peer(block_ref(0, 10));
+            ck.mark_shard_useful_from_peer(block_ref(2, 10));
+
+            // Both signals remain useful through two full committee turnovers.
+            let last_useful_round = 10 + 2 * committee_size as RoundNumber;
+            for current_round in [10, last_useful_round] {
+                let (headers, shards) = ck.useful_authors_bitmasks(current_round);
+                assert!(headers.contains(0));
+                assert!(shards.contains(2));
+            }
+
+            // Without a refresh, both expire in the following round.
+            let (headers, shards) = ck.useful_authors_bitmasks(last_useful_round + 1);
+            assert!(!headers.contains(0));
+            assert!(!shards.contains(2));
+        }
     }
 
     #[test]
     fn test_useful_authors_to_peer_bitmask() {
-        let mut ck = ConnectionKnowledge::new(1, 20);
-        ck.mark_header_useful_to_peer(block_ref(0, 10));
-        ck.mark_shard_useful_to_peer(block_ref(2, 10));
-        let (headers, shards) = ck.useful_authors_to_peer_bitmasks(20);
-        assert!(headers.contains(0));
-        assert!(shards.contains(2));
+        for committee_size in [10, 31, 100] {
+            let mut ck = ConnectionKnowledge::new(1, committee_size);
+            ck.mark_header_useful_to_peer(block_ref(0, 10));
+            ck.mark_shard_useful_to_peer(block_ref(2, 10));
+
+            let last_useful_round = 10 + 2 * committee_size as RoundNumber;
+            for current_round in [10, last_useful_round] {
+                let (headers, shards) = ck.useful_authors_to_peer_bitmasks(current_round);
+                assert!(headers.contains(0));
+                assert!(shards.contains(2));
+            }
+
+            let (headers, shards) = ck.useful_authors_to_peer_bitmasks(last_useful_round + 1);
+            assert!(!headers.contains(0));
+            assert!(!shards.contains(2));
+        }
     }
 
     #[test]
