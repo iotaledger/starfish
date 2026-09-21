@@ -788,7 +788,8 @@ impl Metrics {
             .unwrap(),
             utilization_timer: register_int_counter_vec_with_registry!(
                 "utilization_timer",
-                "Utilization timer",
+                "Wall-clock microseconds spent inside a component (NOT CPU time; \
+                 a component that awaits another task counts that wait)",
                 &["proc"],
                 registry,
             )

@@ -313,6 +313,21 @@ impl CommitObserver for RealCommitHandler {
                 let gap = commit.0.anchor.round.saturating_sub(block.round());
                 self.metrics.commit_gap.observe(gap as f64);
 
+                // Count the commit before the latency guard below. This is a
+                // commit counter, not a latency sample: blocks whose latency
+                // exceeds the 60s cap -- exactly the withheld Byzantine blocks
+                // under a chain-bomb -- were skipped entirely, so "committed 0
+                // blocks from author X" was indistinguishable from "committed
+                // late". Only the latency histograms belong behind that guard.
+                // Genesis (round 0) stays excluded: its meta_creation_time is
+                // zero, so the guard's zero-timestamp half used to drop it.
+                if block.round() > 0 {
+                    self.metrics
+                        .committed_blocks
+                        .with_label_values(&[&block.authority().to_string()])
+                        .inc();
+                }
+
                 let block_creation_time = block.meta_creation_time();
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
@@ -339,10 +354,6 @@ impl CommitObserver for RealCommitHandler {
                         .block_committed_latency_squared_micros
                         .inc_by(block_latency.as_micros().pow(2) as u64);
                 }
-                self.metrics
-                    .committed_blocks
-                    .with_label_values(&[&block.authority().to_string()])
-                    .inc();
 
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }

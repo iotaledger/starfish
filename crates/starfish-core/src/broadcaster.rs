@@ -874,7 +874,28 @@ where
         }
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    let batch = BlockBatch::full_only(DataSource::BlockBundleStreaming, blocks);
+    let mut batch = BlockBatch::full_only(DataSource::BlockBundleStreaming, blocks);
+    // Byzantine senders advertise which authorities' content they would find
+    // useful in return. Every Byzantine strategy disseminates through this
+    // path, and a bare `full_only` batch carries no bitmask, so honest peers
+    // running PushUseful never mark any author useful for them and starve
+    // them of relayed history -- handicapping the adversary rather than
+    // demonstrating a stronger defence. Restricted to Byzantine senders: this
+    // function also serves honest validators in DisseminationMode::Pull, and
+    // `send_full_block_batch` documents that full-block protocols deliberately
+    // do not advertise header/shard usefulness.
+    if inner.dag_state.byzantine_strategy.is_some() {
+        if let Some(ck) = inner
+            .cordial_knowledge
+            .connection_knowledge(to_whom_authority_index)
+        {
+            let current_round = inner.dag_state.highest_round();
+            let (useful_headers, useful_shards) = ck.read().useful_authors_bitmasks(current_round);
+            batch.useful_headers_authors = useful_headers;
+            batch.useful_shards_authors = useful_shards;
+            report_useful_authorities(metrics, peer.as_str(), useful_headers, useful_shards);
+        }
+    }
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
