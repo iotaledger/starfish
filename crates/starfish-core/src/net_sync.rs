@@ -425,6 +425,13 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
     tokio::spawn(async move {
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         while let Some((blocks, source)) = rx.recv().await {
+            // Symmetry with `handle_batch`'s "Network: verify blocks" timer,
+            // which covers the full-block path. Starfish header verification
+            // happens here, off the connection loop, so without this timer the
+            // two protocols are not comparably instrumented.
+            let _header_timer = metrics
+                .utilization_timer
+                .utilization_timer("Network: verify headers");
             let connection_knowledge = inner.cordial_knowledge.connection_knowledge(peer_id);
             let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
             let needed_before_verify = filter_for_blocks.needed_headers(&incoming_digests);
