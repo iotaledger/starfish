@@ -32,7 +32,12 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     types::{
-        AuthorityIndex, BlockReference, PartialSig, PartialSigKind, RoundNumber, VerifiedBlock,
+        AuthorityIndex,
+        BlockReference,
+        PartialSig,
+        PartialSigKind,
+        RoundNumber,
+        VerifiedBlock,
     },
 };
 
