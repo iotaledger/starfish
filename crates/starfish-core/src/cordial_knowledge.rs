@@ -18,8 +18,10 @@ use ahash::AHashSet;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::metrics::Metrics;
-use crate::types::{AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, RoundNumber};
+use crate::{
+    metrics::Metrics,
+    types::{AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, RoundNumber},
+};
 
 /// Per-block dag metadata: parent refs and an `AuthoritySet` known-by bitmask.
 type DagBlockEntry = (Vec<BlockReference>, AuthoritySet);

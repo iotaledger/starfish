@@ -5,7 +5,6 @@
 use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use ahash::AHashSet;
-
 use tokio::sync::mpsc;
 
 use crate::{
@@ -20,8 +19,16 @@ use crate::{
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
     types::{
-        AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
-        ReconstructedTransactionData, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
+        AuthorityIndex,
+        BlockReference,
+        PartialSig,
+        PartialSigKind,
+        ProvableShard,
+        ReconstructedTransactionData,
+        RoundNumber,
+        SailfishNoVoteCert,
+        SailfishTimeoutCert,
+        Stake,
         VerifiedBlock,
     },
 };

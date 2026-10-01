@@ -185,8 +185,11 @@ pub mod test_protocol_metrics {
 #[cfg(test)]
 mod tests {
     use super::{
-        FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS, FINAL_METRICS_CURL_MAX_TIME_SECS,
-        METRICS_CURL_CONNECT_TIMEOUT_SECS, METRICS_CURL_MAX_TIME_SECS, ProtocolMetrics,
+        FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS,
+        FINAL_METRICS_CURL_MAX_TIME_SECS,
+        METRICS_CURL_CONNECT_TIMEOUT_SECS,
+        METRICS_CURL_MAX_TIME_SECS,
+        ProtocolMetrics,
         test_protocol_metrics::TestProtocolMetrics,
     };
     use crate::{benchmark::BenchmarkParameters, client::Instance};

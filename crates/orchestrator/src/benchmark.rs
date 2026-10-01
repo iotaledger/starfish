@@ -729,12 +729,14 @@ pub mod test {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::settings::Settings;
-
     use super::{
-        BenchmarkParametersGeneric, CommitteeScalingPlan, LatencyThroughputSweepPlan,
-        ProtocolParameters, StabilityOutage,
+        BenchmarkParametersGeneric,
+        CommitteeScalingPlan,
+        LatencyThroughputSweepPlan,
+        ProtocolParameters,
+        StabilityOutage,
     };
+    use crate::settings::Settings;
 
     /// Mock benchmark type for unit tests.
     #[allow(dead_code)]
