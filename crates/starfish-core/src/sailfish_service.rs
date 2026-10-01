@@ -18,8 +18,17 @@ use crate::{
     crypto::{self, SignatureBytes, Signer},
     metrics::Metrics,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, RoundNumber,
-        SailfishNoVoteCert, SailfishNoVoteMsg, SailfishTimeoutCert, SailfishTimeoutMsg, Stake,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockReference,
+        CertMessage,
+        CertMessageKind,
+        RoundNumber,
+        SailfishNoVoteCert,
+        SailfishNoVoteMsg,
+        SailfishTimeoutCert,
+        SailfishTimeoutMsg,
+        Stake,
     },
 };
 

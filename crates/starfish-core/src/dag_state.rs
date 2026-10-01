@@ -33,8 +33,16 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
-        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, TransactionData,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockDigest,
+        BlockReference,
+        BlsAggregateCertificate,
+        ProvableShard,
+        RoundNumber,
+        SailfishNoVoteCert,
+        SailfishTimeoutCert,
+        TransactionData,
         VerifiedBlock,
     },
 };
@@ -3436,8 +3444,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        BlockAuthenticationScheme, ByzantineStrategy, CACHED_ROUNDS, CertificateEvent,
-        ConsensusProtocol, DacCertificateVerificationState, DagState, DataSource, OwnBlockData,
+        BlockAuthenticationScheme,
+        ByzantineStrategy,
+        CACHED_ROUNDS,
+        CertificateEvent,
+        ConsensusProtocol,
+        DacCertificateVerificationState,
+        DagState,
+        DataSource,
+        OwnBlockData,
     };
     use crate::{
         block_authentication::BlockAuthentication,
@@ -3447,8 +3462,16 @@ mod tests {
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            AuthorityIndex,
+            AuthoritySet,
+            BaseTransaction,
+            BlockReference,
+            BlsAggregateCertificate,
+            ProvableShard,
+            RoundNumber,
+            SailfishFields,
+            SailfishNoVoteCert,
+            Transaction,
             VerifiedBlock,
         },
     };
